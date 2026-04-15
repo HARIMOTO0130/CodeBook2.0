@@ -491,7 +491,7 @@ export default {
         console.log('加载学生API响应:', response)
         console.log('加载学生响应data结构:', response.data)
         console.log('加载学生响应data类型:', typeof response.data)
-        console.log('加载学生响应data键名:', Object.keys(response.data))
+        console.log('加载学生响应data键名:', response.data ? Object.keys(response.data) : '无数据')
         
         // 处理不同的响应格式
         let data = response.data
@@ -500,7 +500,7 @@ export default {
         // 处理分页数据
         console.log('检查data是否为数组:', Array.isArray(data))
         if (Array.isArray(data)) {
-          console.log('情况1: data是数组')
+          console.log('情况1: data是数组，长度:', data.length)
           results = data
         } else if (data && Array.isArray(data.results)) {
           console.log('情况2: data.results是数组，长度:', data.results.length)
@@ -522,7 +522,7 @@ export default {
           name: student.student_name || student.username,
           studentId: student.student_no || '',
           className: student.class_name || '未分配班级',
-          classId: student.class_obj || null,
+          classId: student.class_id || student.class_obj || null,
           progress: student.progress || 0,
           score: Math.round(student.avg_score || 0),
           assignmentCount: student.submission_count || 0,
@@ -537,10 +537,15 @@ export default {
         console.log('处理后的学生数据:', this.students)
         console.log('页面显示的学生列表（部分）:', this.students.map(s => ({id: s.id, name: s.name, studentId: s.studentId})))
         
+        // 确保学生数据数组不为空
+        console.log('最终学生数据长度:', this.students.length)
+        
       } catch (error) {
         console.error('加载学生失败:', error)
         console.error('错误详情:', error.response || error.message)
         alert('加载学生失败: ' + (error.response?.data?.error || error.message))
+        // 出错时设置为空数组
+        this.students = []
       } finally {
         this.loading = false
       }
@@ -684,34 +689,32 @@ export default {
       
       this.assigning = true
       try {
-        // 调用真实API更新学生班级
+        // 调用真实API添加学生到班级
         const selectedClass = this.classes.find(cls => cls.id === parseInt(this.assigningClassId))
         const className = selectedClass ? selectedClass.name : '未知班级'
         
-        // 使用updateStudent方法逐个更新学生的班级
+        // 使用classApi.addStudent方法逐个添加学生到班级
         let successCount = 0
         const errorMessages = []
         
         for (const studentId of this.selectedStudents) {
           try {
-            await studentApi.updateStudent(studentId, {
-              class_id: this.assigningClassId
-            })
+            await classApi.addStudent(this.assigningClassId, studentId)
             successCount++
           } catch (error) {
-            console.error(`更新学生${studentId}失败:`, error)
-            errorMessages.push(`学生ID ${studentId} 更新失败`)
+            console.error(`添加学生${studentId}到班级失败:`, error)
+            errorMessages.push(`学生ID ${studentId} 添加失败`)
           }
         }
         
         // 显示结果消息
         if (successCount > 0) {
-          this.showMessage(`成功分配${successCount}名学生到班级`, 'success')
+          this.showMessage(`成功添加${successCount}名学生到班级`, 'success')
         }
         
         if (errorMessages.length > 0) {
-          this.showMessage(`${errorMessages.length}名学生分配失败，请检查网络或学生信息`, 'error')
-          console.error('分配失败详情:', errorMessages)
+          this.showMessage(`${errorMessages.length}名学生添加失败，请检查网络或学生信息`, 'error')
+          console.error('添加失败详情:', errorMessages)
         }
         
         this.closeModal()
@@ -719,15 +722,15 @@ export default {
         // 刷新学生列表，获取最新数据
         await this.loadStudents()
         
-        console.log('学生分配到班级操作完成', {
+        console.log('学生添加到班级操作完成', {
           totalSelected: this.selectedStudents.length,
           successCount: successCount,
           classId: this.assigningClassId,
           className: className
         })
       } catch (error) {
-        console.error('分配学生失败:', error)
-        this.showMessage('分配学生失败，请稍后重试', 'error')
+        console.error('添加学生失败:', error)
+        this.showMessage('添加学生失败，请稍后重试', 'error')
         this.closeModal()
       } finally {
         this.assigning = false

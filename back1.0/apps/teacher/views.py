@@ -134,7 +134,7 @@ class ClassViewSet(viewsets.ModelViewSet):
         serializer = StudentSerializer(students, many=True)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], url_path='students')
     def add_student(self, request, pk=None):
         """添加学生到班级"""
         class_obj = self.get_object()
@@ -447,7 +447,8 @@ class StudentViewSet(viewsets.ModelViewSet):
                 
                 # 如果提供了班级ID，则返回该班级的学生
                 if class_id:
-                    return Student.objects.filter(class_name=class_id)
+                    # 使用StudentClass关系获取班级学生，使用class_obj_id进行过滤
+                    return Student.objects.filter(student_classes__class_obj_id=class_id, student_classes__is_active=True)
                 
                 # 否则返回所有学生
                 return Student.objects.all()

@@ -337,11 +337,17 @@ export default {
                 email: ''
               },
               username: student.student_name || '未知',
+              student_name: student.student_name || '未知',
+              student_no: student.student_no || '',
               student_id: student.student_no || null
             }
           })
         }
         
+        // 确保classData包含student_count字段
+        if (!classData.student_count) {
+          classData.student_count = classData.students ? classData.students.length : 0
+        }
         classInfo.value = classData
         
         console.log('班级学生数据:', classInfo.value.students)
@@ -639,6 +645,11 @@ export default {
       showUploadModal,
       uploadResource,
       selectedFile,
+      showAddStudentModal,
+      searchQuery,
+      searchResults,
+      loadingStudents,
+      selectedStudents,
       loadClassDetail,
       goToStudentDetail,
       goToAssignmentDetail,
@@ -647,6 +658,10 @@ export default {
       createAssignment,
       viewStudentProgress,
       confirmRemoveStudent,
+      confirmAddStudents,
+      searchStudents,
+      toggleStudentSelection,
+      isStudentInClass,
       getAssignmentStatus,
       getAssignmentStatusText,
       getResourceIcon,
