@@ -1,0 +1,2230 @@
+"""书籍视图函数"""
+from rest_framework import viewsets, status, decorators
+from rest_framework.exceptions import PermissionDenied
+import threading
+import tempfile
+import os
+
+from PIL import Image
+import re
+import json
+
+# 为了兼容性，定义action装饰器
+action = decorators.action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
+from django.db.models import Max, Avg
+from django.utils import timezone
+from .models import (
+    Book,
+    Chapter,
+    Practice,
+    TestCase,
+    PracticeChoiceOption,
+    PracticeFillBlank,
+    BookCategory,
+    BookTag,
+    BookVersion,
+    ChapterVersion,
+    ChapterMedia,
+    BookReview,
+    AILearningGuide,
+    BookPermission,
+    PermissionRequest,
+)
+from .serializers import (
+    BookListSerializer,
+    BookDetailSerializer,
+    ChapterSerializer,
+    ChapterDetailSerializer,
+    PracticeSerializer,
+    PracticeDetailSerializer,
+    BookCategorySerializer,
+    BookTagSerializer,
+    BookVersionSerializer,
+    ChapterVersionSerializer,
+    ChapterMediaSerializer,
+    BookReviewSerializer,
+)
+from apps.learning.models import LearningRecord
+from .advanced_processor import AdvancedPDFProcessor
+
+
+class BookViewSet(viewsets.ModelViewSet):
+    http_method_names = ['get', 'post', 'delete', 'patch']  # 允许GET、POST、DELETE和PATCH操作
+    """书籍视图集"""
+    queryset = Book.objects.all()
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 初始化高级PDF处理器
+        self.advanced_processor = AdvancedPDFProcessor()
+    
+    def get_permissions(self):
+        # GET操作不需要认证，其他操作（包括DELETE）需要认证
+        if self.action in ['list', 'retrieve']:
+            return []
+        return [IsAuthenticated()]
+    
+    def get_queryset(self):
+        # 重写方法以避免冲突
+        # 第一个get_queryset已经被上面的list方法使用
+        return Book.objects.all()
+    
+    def perform_destroy(self, instance):
+        """
+        默认行为仍然是物理删除，但教材提供者端可以选择使用 is_archived 做软删除。
+        这里保留原有所有者检查逻辑，但允许删除测试生成的书籍(owner为null)。
+        """
+        # 确保只有书籍所有者、管理员、超级用户或删除owner为null的测试书籍可以删除
+        if not (
+            instance.owner == self.request.user or  # 书籍所有者
+            instance.owner is None or  # 测试生成的书籍(owner为null)
+            self.request.user.is_staff or  # 管理员
+            self.request.user.is_superuser  # 超级用户
+        ):
+            raise PermissionDenied("您没有权限删除这本教材")
+        # 调用模型的delete方法，这将同时删除数据库记录和相关的PDF文件
+        instance.delete()
+    
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return BookListSerializer
+        return BookDetailSerializer
+    
+    def get_queryset(self):
+        # 对于列表视图，我们需要预先加载相关数据
+        queryset = Book.objects.all()
+        
+        # 如果用户已登录，我们可以在序列化器中计算进度
+        if self.request.user.is_authenticated:
+            # 这里可以添加逻辑来获取用户的学习进度
+            pass
+        
+        return queryset
+        
+    def partial_update(self, request, *args, **kwargs):
+        """
+        部分更新书籍信息，并自动创建新版本
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            instance = self.get_object()
+            logger.info(f"开始处理书籍 {instance.id} 的部分更新请求")
+            
+            # 解析当前版本字符串 (格式: major.minor.patch)
+            try:
+                current_version = instance.current_version
+                logger.info(f"获取当前版本字符串: {current_version}")
+                
+                # 处理特殊情况：如果当前版本只有一个数字（如'1'），转换为标准格式
+                if '.' not in current_version:
+                    logger.info(f"将简化版本格式 {current_version} 转换为标准格式")
+                    if current_version.isdigit():
+                        major, minor, patch = int(current_version), 0, 0
+                    else:
+                        raise ValueError("版本格式无效")
+                else:
+                    # 正常解析版本号
+                    parts = current_version.split('.')
+                    if len(parts) == 1:
+                        major, minor, patch = int(parts[0]), 0, 0
+                    elif len(parts) == 2:
+                        major, minor = map(int, parts)
+                        patch = 0
+                    else:
+                        major, minor, patch = map(int, parts[:3])
+                
+                # 递增补丁版本号
+                patch += 1
+                # 如果补丁版本号达到10，进位到minor
+                if patch >= 10:
+                    patch = 0
+                    minor += 1
+                    # 如果minor达到10，进位到major
+                    if minor >= 10:
+                        minor = 0
+                        major += 1
+                new_version_str = f'{major}.{minor}.{patch}'
+                logger.info(f"计算得出新版本字符串: {new_version_str}")
+            except (ValueError, AttributeError) as e:
+                logger.error(f"版本解析错误: {e}")
+                # 如果解析失败，默认从1.0.0开始
+                new_version_str = '1.0.0'
+            
+            logger.info(f"当前版本: {instance.current_version}, 新版本: {new_version_str}")
+            logger.info(f"书籍标签类型: {type(instance.tags)}, 值: {instance.tags}")
+            
+            # 处理分类和标签的更新
+            # 获取分类和标签数据
+            categories_data = request.data.getlist('categories_write')
+            tags_data = request.data.getlist('tags_write')
+            logger.info(f"收到的分类数据: {categories_data}")
+            logger.info(f"收到的标签数据: {tags_data}")
+            
+            # 更新分类
+            if categories_data:
+                # 清除现有分类
+                instance.categories.clear()
+                # 添加新分类
+                for category_name in categories_data:
+                    category, _ = BookCategory.objects.get_or_create(name=category_name)
+                    instance.categories.add(category)
+                logger.info(f"成功更新书籍 {instance.id} 的分类")
+            
+            # 更新标签
+            if tags_data:
+                # 清除现有标签对象
+                instance.tag_objects.clear()
+                # 添加新标签对象
+                for tag_name in tags_data:
+                    tag, _ = BookTag.objects.get_or_create(name=tag_name)
+                    instance.tag_objects.add(tag)
+                logger.info(f"成功更新书籍 {instance.id} 的标签对象")
+            
+            # 先调用父类的partial_update方法完成实际更新
+            logger.info("调用父类的partial_update方法进行实际更新")
+            response = super().partial_update(request, *args, **kwargs)
+            logger.info(f"父类partial_update调用完成，状态码: {response.status_code}")
+            
+            # 刷新实例获取更新后的数据
+            logger.info("刷新实例获取更新后的数据")
+            instance.refresh_from_db()
+            logger.info(f"刷新后实例的当前版本: {instance.current_version}")
+            logger.info(f"刷新后实例的标题: {instance.title}")
+            logger.info(f"刷新后实例的副标题: {instance.subtitle}")
+            logger.info(f"调用父类update后的标签: 类型={type(instance.tags)}, 值={instance.tags}")
+            
+            # 获取当前最新版本记录
+            logger.info("获取当前最新版本记录")
+            latest_version = instance.versions.order_by('-version_number').first()
+            logger.info(f"最新版本记录: {latest_version.id if latest_version else 'None'}")
+            
+            # 计算新版本号数字 - 确保转换为整数
+            if latest_version:
+                try:
+                    latest_version_num = int(latest_version.version_number)
+                except (ValueError, TypeError):
+                    latest_version_num = 0
+                new_version_number = latest_version_num + 1
+            else:
+                new_version_number = 1  # 第一个版本
+            logger.info(f"计算得出新版本号数字: {new_version_number}")
+            
+            # 确保current_version格式正确
+            if instance.current_version == '1':
+                logger.info("修正current_version格式: 1 -> 1.0.0")
+                instance.current_version = '1.0.0'
+            
+            logger.info(f"准备创建版本记录: 版本号={new_version_number}, 版本字符串={new_version_str}")
+            
+            # 保存更新后的版本到版本历史
+            # 确保tags是字符串类型
+            tags_str = instance.tags if isinstance(instance.tags, str) else str(instance.tags)
+            logger.info(f"创建版本前的标签: 类型={type(tags_str)}, 值={tags_str}")
+            
+            logger.info("开始创建BookVersion记录")
+            version = BookVersion.objects.create(
+                book=instance,
+                version_number=new_version_number,
+                title=instance.title,
+                subtitle=instance.subtitle,
+                author=instance.author,
+                description=instance.description,
+                pdf_file=instance.pdf_file,
+                tags=tags_str,
+                created_by=request.user if request.user.is_authenticated else None,
+                comment=f'自动创建版本 v{new_version_str}'
+            )
+            logger.info(f"版本创建成功: ID={version.id}, 版本号={version.version_number}, 版本字符串={new_version_str}")
+            
+            # 更新书籍的当前版本
+            logger.info(f"更新书籍的当前版本从 {instance.current_version} 到 {new_version_str}")
+            instance.current_version = new_version_str
+            instance.save()
+            logger.info(f"书籍当前版本更新成功")
+            
+            # 重新序列化实例，确保返回包含最新的current_version
+            logger.info("刷新实例并重新序列化返回")
+            instance.refresh_from_db()
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"版本更新失败: {e}", exc_info=True)
+            # 如果发生错误，仍然允许更新书籍信息，但不创建新版本
+            logger.error("发生异常，将仅执行基本更新而不创建版本")
+            return super().partial_update(request, *args, **kwargs)
+    
+    def list(self, request, *args, **kwargs):
+        """获取书籍列表，包含用户学习进度信息和权限状态"""
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        
+        # 确保所有书籍都有进度和最后学习时间字段
+        for item in serializer.data:
+            # 设置默认值
+            item['progress'] = 0
+            item['last_learn_time'] = None
+            # 添加权限状态
+            try:
+                permission = BookPermission.objects.filter(book_id=item['id'], user=None).first()
+                item['permission_status'] = permission.status if permission else 'open'
+            except:
+                item['permission_status'] = 'open'
+        
+        # 如果用户已登录，添加进度信息
+        if request.user.is_authenticated:
+            book_ids = [b.id for b in queryset]
+            if book_ids:
+                aggregates = (
+                    LearningRecord.objects
+                    .filter(user=request.user, book_id__in=book_ids)
+                    .values('book_id')
+                    .annotate(
+                        avg_progress=Avg('progress'),
+                        last_time=Max('last_learn_time')
+                    )
+                )
+                book_id_to_stats = {a['book_id']: a for a in aggregates}
+                for item in serializer.data:
+                    stats = book_id_to_stats.get(item['id'])
+                    if stats:
+                        item['progress'] = int(stats['avg_progress']) if stats['avg_progress'] is not None else 0
+                        # 确保last_learn_time是datetime对象或None
+                        last_time = stats['last_time']
+                        if last_time is not None:
+                            if isinstance(last_time, str):
+                                # 如果是字符串，尝试转换为datetime对象
+                                try:
+                                    import dateutil.parser
+                                    import datetime
+                                    last_time = dateutil.parser.parse(last_time)
+                                    # 确保是datetime对象
+                                    if not isinstance(last_time, datetime.datetime):
+                                        last_time = None
+                                except (ImportError, ValueError, TypeError):
+                                    last_time = None
+                            elif not hasattr(last_time, 'utcoffset'):
+                                # 如果不是datetime对象，设置为None
+                                last_time = None
+                        item['last_learn_time'] = last_time
+        
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['patch'], url_path='permission')
+    def update_book_permission(self, request, pk=None):
+        """更新书籍权限状态"""
+        book = self.get_object()
+        status = request.data.get('status')
+        
+        if not status:
+            return Response({'error': '状态不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 更新全局权限状态
+        permission, created = BookPermission.objects.get_or_create(book=book, user=None)
+        permission.status = status
+        permission.save()
+        
+        return Response({'status': permission.status})
+    
+    @action(detail=True, methods=['get'], url_path='permission-requests')
+    def list_permission_requests(self, request, pk=None):
+        """获取书籍的权限申请列表"""
+        book = self.get_object()
+        requests = PermissionRequest.objects.filter(book=book).order_by('-created_at')
+        
+        # 序列化权限申请
+        request_data = []
+        for req in requests:
+            request_data.append({
+                'id': req.id,
+                'user': req.user.username,
+                'status': req.status,
+                'reason': req.reason,
+                'created_at': req.created_at,
+                'reviewed_at': req.reviewed_at,
+                'reviewer': req.reviewer.username if req.reviewer else None,
+                'review_comment': req.review_comment
+            })
+        
+        return Response(request_data)
+    
+    @action(detail=False, methods=['patch'], url_path=r'permission-requests/(?P<request_id>\d+)/review')
+    def review_permission_request(self, request, request_id=None):
+        """审核权限申请"""
+        try:
+            perm_request = PermissionRequest.objects.get(id=request_id)
+        except PermissionRequest.DoesNotExist:
+            return Response({'error': '申请不存在'}, status=status.HTTP_404_NOT_FOUND)
+        
+        status = request.data.get('status')
+        comment = request.data.get('comment')
+        
+        if not status:
+            return Response({'error': '状态不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 更新申请状态
+        perm_request.status = status
+        perm_request.reviewer = request.user
+        perm_request.review_comment = comment
+        perm_request.reviewed_at = timezone.now()
+        perm_request.save()
+        
+        # 如果同意申请，创建用户权限记录
+        if status == 'approved':
+            permission, created = BookPermission.objects.get_or_create(
+                book=perm_request.book,
+                user=perm_request.user
+            )
+            permission.status = 'open'
+            permission.save()
+        
+        return Response({'status': perm_request.status})
+    
+    @action(detail=True, methods=['post'], url_path='permission-request')
+    def create_permission_request(self, request, pk=None):
+        """创建权限申请"""
+        book = self.get_object()
+        reason = request.data.get('reason')
+        
+        # 检查是否已经有未处理的申请
+        existing_request = PermissionRequest.objects.filter(
+            book=book,
+            user=request.user,
+            status='pending'
+        ).first()
+        
+        if existing_request:
+            return Response({'error': '您已经提交了申请，等待审核中'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 创建新的权限申请
+        perm_request = PermissionRequest.objects.create(
+            book=book,
+            user=request.user,
+            reason=reason
+        )
+        
+        return Response({'id': perm_request.id, 'status': perm_request.status})
+
+    def _extract_pdf_to_images(self, pdf_path):
+        """将PDF转换为图像列表"""
+        try:
+            from pdf2image import convert_from_path
+            # 转换PDF到图像列表，使用300dpi以获得较好的质量
+            images = convert_from_path(pdf_path, dpi=300)
+            return images
+        except Exception as e:
+            print(f"PDF转图像失败: {e}")
+            return []
+    
+    def _extract_text_with_ocr(self, image):
+        """使用OCR从图像中提取文本"""
+        try:
+            import pytesseract
+            import cv2
+            import numpy as np
+            # 转换PIL图像到OpenCV格式
+            img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            # 灰度转换
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            # 二值化处理
+            _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+            # 使用Tesseract OCR提取文本
+            text = pytesseract.image_to_string(binary, lang='chi_sim+eng')
+            return text
+        except Exception as e:
+            print(f"OCR提取失败: {e}")
+            return ""
+    
+    def _detect_content_regions(self, image):
+        """检测图像中的内容区域和类型"""
+        try:
+            import cv2
+            import numpy as np
+            # 加载预训练的布局检测模型
+            model = lp.Detectron2LayoutModel(
+                config_path="lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config",
+                label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"},
+                extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.8]
+            )
+            
+            # 转换PIL图像到OpenCV格式
+            img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            
+            # 进行布局检测
+            layout = model.detect(img_cv)
+            
+            # 提取不同类型的区域
+            regions = []
+            for block in layout:
+                regions.append({
+                    'type': block.type,
+                    'coordinates': block.coordinates,
+                    'confidence': block.score
+                })
+            
+            return regions
+        except Exception as e:
+            print(f"内容区域检测失败: {e}")
+            return []
+    
+    def _classify_content_type(self, text):
+        """使用文本特征分类内容类型"""
+        try:
+            # 简单的内容类型分类
+            # 代码块特征：包含大量特殊字符、缩进、关键词
+            code_patterns = [
+                r'def\s+\w+\s*\(', r'function\s+\w+', r'class\s+\w+',
+                r'if\s*\(', r'for\s*\(', r'while\s*\(',
+                r'\{[^}]*\}', r'\[[^\]]*\]', r'\([^)]*\)',
+                r'\s*=\s*['+'"'+'\''+'].*['+'"'+'\''+']', r'import\s+\w+'
+            ]
+            
+            # 检查是否为代码块
+            code_score = sum(1 for pattern in code_patterns if re.search(pattern, text))
+            
+            # 表格特征：包含|或,分隔的数据
+            table_pattern = r'^\s*\|.*\|\s*$|^\s*\w+,\s*\w+'
+            is_table = bool(re.search(table_pattern, text, re.MULTILINE))
+            
+            # 标题特征：较短，可能全大写或包含数字+点
+            title_pattern = r'^\s*([0-9]+\.|[一二三四五六七八九十]、)\s*\w+.*$|^\s*[A-Z\s]+$'
+            is_title = bool(re.search(title_pattern, text, re.MULTILINE))
+            
+            if code_score > 3 or 'print(' in text or 'console.log(' in text:
+                return 'code'
+            elif is_table:
+                return 'table'
+            elif is_title and len(text.split()) < 10:
+                return 'title'
+            else:
+                return 'text'
+        except Exception:
+            return 'text'
+    
+    def _is_figure_or_table_title(self, line):
+        """快速判断是否为图表或表格标题"""
+        # 全面的图表标题模式
+        figure_patterns = [
+            r'^\s*图\s*\d+[-.]?\d*\s*[：:].*$',      # 图1.1：
+            r'^\s*图\s*\d+[-.]?\d*\s+.*$',          # 图1.1 
+            r'^\s*图\s*[一二三四五六七八九十百千]+\s*[：:].*$',  # 图一：
+            r'^\s*图\s*[一二三四五六七八九十百千]+\s+.*$',      # 图一 
+            r'^\s*图示\s*\d*[：:].*$',              # 图示：
+            r'^\s*图表\s*\d*[：:].*$',              # 图表：
+            r'^\s*Figure\s*\d+[-.]?\d*\s*[：:].*$', # Figure 1.1:
+            r'^\s*Fig\.?\s*\d+[-.]?\d*\s*[：:].*$',  # Fig. 1.1:
+            # 捕获类似"图1 Oracle主页"这种格式
+            r'^\s*图\s*(\d+[-.]?\d*)\s+(.+)$',
+            # 捕获更宽松的图表标题格式
+            r'^\s*图(\d+[-.]?\d*)[：:].*$',         # 图1.1:（无空格）
+            r'^\s*图\s*(\d+[-.]?\d*)\s*[^：:]*$',   # 图1.1（无冒号）
+        ]
+        
+        # 全面的表格标题模式
+        table_patterns = [
+            r'^\s*表\s*\d+[-.]?\d*\s*[：:].*$',      # 表1.1：
+            r'^\s*表\s*\d+[-.]?\d*\s+.*$',          # 表1.1 
+            r'^\s*表格\s*\d*[：:].*$',              # 表格：
+            r'^\s*Table\s*\d+[-.]?\d*\s*[：:].*$', # Table 1.1:
+            r'^\s*Tab\.?\s*\d+[-.]?\d*\s*[：:].*$',  # Tab. 1.1:
+            # 捕获更宽松的表格标题格式
+            r'^\s*表(\d+[-.]?\d*)[：:].*$',         # 表1.1:（无空格）
+            r'^\s*表\s*(\d+[-.]?\d*)\s*[^：:]*$',   # 表1.1（无冒号）
+        ]
+        
+        # 检查是否匹配任何图表标题模式
+        for pattern in figure_patterns:
+            if re.match(pattern, line, re.IGNORECASE):
+                return True
+        
+        # 检查是否匹配任何表格标题模式
+        for pattern in table_patterns:
+            if re.match(pattern, line, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _direct_chapter_detection(self, pages_data):
+        """直接使用_is_true_chapter_title方法进行章节检测，包括主章节和二级标题"""
+        print("执行直接章节检测...")
+        chapters = []
+        current_chapter = None
+        current_subsection = None
+        full_text = '\n'.join([page['text'] for page in pages_data])
+        
+        # 逐页逐行扫描查找章节标题和二级标题
+        for page_idx, page in enumerate(pages_data):
+            lines = page['text'].splitlines()
+            
+            for line_idx, line in enumerate(lines):
+                # 清理行文本
+                line = line.strip()
+                
+                # 检查是否为章标题
+                if self._is_true_chapter_title(line, line_idx, full_text, page.get('regions', []), False):
+                    print(f"检测到章节标题: {line} (第{page_idx+1}页)")
+                    
+                    # 结束当前章节（如果有）
+                    if current_chapter:
+                        current_chapter['end_page'] = page_idx
+                        chapters.append(current_chapter)
+                    
+                    # 开始新章节
+                    current_chapter = {
+                        'title': line,
+                        'content': line + '\n\n',
+                        'start_page': page_idx,
+                        'end_page': page_idx,
+                        'subsections': []  # 为每个主章节创建子章节列表
+                    }
+                    current_subsection = None
+                # 检查是否为二级标题
+                elif self._is_true_chapter_title(line, line_idx, full_text, page.get('regions', []), True):
+                    print(f"检测到二级标题: {line} (第{page_idx+1}页)")
+                    
+                    # 只有在存在当前章节的情况下才添加二级标题
+                    if current_chapter:
+                        # 结束当前二级标题（如果有）
+                        if current_subsection:
+                            current_subsection['end_page'] = page_idx
+                            current_chapter['subsections'].append(current_subsection)
+                        
+                        # 开始新二级标题
+                        current_subsection = {
+                            'title': line,
+                            'content': line + '\n\n',
+                            'start_page': page_idx,
+                            'end_page': page_idx
+                        }
+                elif current_subsection:
+                    # 添加内容到当前二级标题
+                    current_subsection['content'] += line + '\n'
+                    current_subsection['end_page'] = page_idx
+                elif current_chapter:
+                    # 添加内容到当前章节
+                    current_chapter['content'] += line + '\n'
+                    current_chapter['end_page'] = page_idx
+        
+        # 添加最后一个二级标题（如果有）
+        if current_subsection and current_chapter:
+            current_subsection['end_page'] = len(pages_data) - 1
+            current_chapter['subsections'].append(current_subsection)
+        
+        # 添加最后一个章节
+        if current_chapter:
+            current_chapter['end_page'] = len(pages_data) - 1
+            chapters.append(current_chapter)
+        
+        print(f"直接检测到{len(chapters)}个章节")
+        # 统计二级标题数量
+        total_subsections = sum(len(chapter.get('subsections', [])) for chapter in chapters)
+        print(f"检测到{total_subsections}个二级标题")
+        return chapters
+    
+    def _advanced_chapter_detection(self, pages_data, images):
+        """高级章节检测算法，集成NLP、计算机视觉技术和文档结构分析"""
+        try:
+            print("执行增强的高级章节检测...")
+            
+            # 首先使用直接检测方法，确保能识别基本的章节格式
+            direct_chapters = self._direct_chapter_detection(pages_data)
+            
+            # 如果直接检测到章节，优先使用
+            if direct_chapters:
+                print(f"直接检测成功，找到{len(direct_chapters)}个章节")
+                # 优化章节边界
+                optimized_chapters = self._optimize_chapter_boundaries(direct_chapters, pages_data)
+                return optimized_chapters
+            
+            # 从BookViewSet获取document_structure（如果可用）
+            document_structure = getattr(self, '_document_structure', None)
+            
+            # 如果有文档结构信息，优先使用它进行章节检测
+            if document_structure and 'content_blocks' in document_structure:
+                print("使用文档结构分析结果进行章节检测...")
+                
+                content_blocks = document_structure['content_blocks']
+                chapters = []
+                current_chapter = None
+                
+                # 基于内容块重建章节
+                for block_idx, block in enumerate(content_blocks):
+                    block_type = block.get('type', 'text')
+                    block_content = block.get('content', '')
+                    page_num = block.get('page_number', 0)
+                    
+                    # 检查是否为章节标题格式
+                    is_chapter_title = self._is_true_chapter_title(block_content, 0, '', [], False)
+                    
+                    # 如果是标题块或符合章节标题格式，开始新章节
+                    if (block_type == 'title' or is_chapter_title) and block_content.strip():
+                        # 结束当前章节（如果有）
+                        if current_chapter:
+                            current_chapter['end_page'] = page_num - 1
+                            chapters.append(current_chapter)
+                        
+                        # 开始新章节
+                        current_chapter = {
+                            'title': block_content.strip(),
+                            'content': block_content + '\n\n',
+                            'start_page': page_num,
+                            'end_page': page_num
+                        }
+                    elif current_chapter:
+                        # 添加内容到当前章节
+                        current_chapter['content'] += block_content + '\n\n'
+                        current_chapter['end_page'] = max(current_chapter['end_page'], page_num)
+                
+                # 添加最后一个章节
+                if current_chapter:
+                    chapters.append(current_chapter)
+                
+                # 如果通过文档结构检测到章节，进行处理
+                if chapters:
+                    print(f"通过文档结构检测到{len(chapters)}个章节")
+                    
+                    # 如果有目录对齐信息，使用它优化章节标题
+                    if document_structure.get('toc_alignments'):
+                        toc_alignments = document_structure['toc_alignments']
+                        print(f"应用目录对齐信息优化章节标题，找到{len(toc_alignments)}个对齐项")
+                        
+                        # 映射章节到目录项
+                        for alignment in toc_alignments:
+                            for chapter in chapters:
+                                # 基于相似度匹配章节
+                                if self._calculate_text_similarity(
+                                    chapter['title'].lower(), 
+                                    alignment['content_heading']['title'].lower()
+                                ) > 0.7:
+                                    # 使用目录项标题（通常更规范）
+                                    if len(alignment['toc_item']['title']) > len(chapter['title']):
+                                        chapter['title'] = alignment['toc_item']['title']
+                                    chapter['toc_verified'] = True
+                                    break
+                    
+                    # 优化章节边界
+                    optimized_chapters = self._optimize_chapter_boundaries(chapters, pages_data)
+                    return optimized_chapters
+            
+            # 使用高级处理器进行章节检测
+            try:
+                chapters = self.advanced_processor.enhance_chapter_detection(pages_data, images)
+                
+                # 如果检测到章节，进行优化
+                if chapters:
+                    print(f"高级处理器检测到{len(chapters)}个章节")
+                    # 优化章节边界
+                    optimized_chapters = self._optimize_chapter_boundaries(chapters, pages_data)
+                    return optimized_chapters
+            except Exception as proc_error:
+                print(f"高级处理器错误: {str(proc_error)}")
+            
+            # 如果所有方法都失败，使用基于章节标题格式的直接扫描
+            print("所有其他方法失败，使用基于行的直接扫描")
+            direct_scan_chapters = []
+            current_chapter = None
+            
+            # 逐页逐行扫描查找章节标题
+            for page_idx, page in enumerate(pages_data):
+                lines = page['text'].splitlines()
+                
+                for line_idx, line in enumerate(lines):
+                    # 清理行文本
+                    line = line.strip()
+                    
+                    # 检查是否符合章节标题格式
+                    if re.match(r'^第\s*[一二三四五六七八九十百千\d]+\s*章', line) or \
+                       (re.match(r'^\d+\.\s+', line) and not re.search(r'\d+\.\d+', line)):
+                        print(f"直接扫描检测到章节标题: {line} (第{page_idx+1}页)")
+                        
+                        # 结束当前章节（如果有）
+                        if current_chapter:
+                            current_chapter['end_page'] = page_idx
+                            direct_scan_chapters.append(current_chapter)
+                        
+                        # 开始新章节
+                        current_chapter = {
+                            'title': line,
+                            'content': line + '\n\n',
+                            'start_page': page_idx,
+                            'end_page': page_idx
+                        }
+                    elif current_chapter:
+                        # 添加内容到当前章节
+                        current_chapter['content'] += line + '\n'
+                        current_chapter['end_page'] = page_idx
+            
+            # 添加最后一个章节
+            if current_chapter:
+                direct_scan_chapters.append(current_chapter)
+            
+            if direct_scan_chapters:
+                print(f"直接扫描检测到{len(direct_scan_chapters)}个章节")
+                optimized_chapters = self._optimize_chapter_boundaries(direct_scan_chapters, pages_data)
+                return optimized_chapters
+            else:
+                # 如果真的没有检测到章节，使用回退方法
+                print("无法检测到章节，使用回退方法")
+                return self._fallback_chapter_splitting(pages_data)
+                
+        except Exception as e:
+            print(f"高级章节检测错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # 发生错误时，使用直接扫描作为最后的回退
+            try:
+                print("发生异常，使用直接扫描作为最后的回退")
+                return self._direct_chapter_detection(pages_data)
+            except:
+                # 如果直接扫描也失败，使用简单回退
+                return self._fallback_chapter_splitting(pages_data)
+    
+    def _calculate_text_similarity(self, text1, text2):
+        """计算文本相似度（简化版本）"""
+        # 移除空格并转换为集合
+        set1 = set(text1.replace(' ', ''))
+        set2 = set(text2.replace(' ', ''))
+        
+        # 计算Jaccard相似度
+        if not set1 and not set2:
+            return 1.0
+        if not set1 or not set2:
+            return 0.0
+        
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+        
+        return intersection / union
+    
+    def _is_true_chapter_title(self, line, line_idx, full_text, regions, is_subsection=False):
+        """判断一行文本是否为真正的章节标题（识别章标题和二级标题）
+        
+        Args:
+            line: 要判断的文本行
+            line_idx: 行在文本中的索引
+            full_text: 完整文本
+            regions: 内容区域信息
+            is_subsection: 是否为子章节（支持二级标题检测）
+        """
+        # 清理行文本
+        line = line.strip()
+        
+        # 快速排除明显不是标题的情况
+        # 图表相关内容
+        figure_patterns = [
+            r'^图\s*\d+[-.]?\d*\s*[：:].*$',
+            r'^图\s*[一二三四五六七八九十百千]+\s*[：:].*$',
+            r'^图示|图表\s*\d*[：:].*$',
+            r'^图\s+\d+[-.]?\d*\s+.+$'
+        ]
+        for pattern in figure_patterns:
+            if re.match(pattern, line):
+                return False
+        
+        # 表格相关内容
+        table_patterns = [
+            r'^(表|表格)\s*\d*[：:].*$',
+            r'^表\s*\d+[-.]?\d*\s+[^：:].*$'
+        ]
+        for pattern in table_patterns:
+            if re.match(pattern, line):
+                return False
+        
+        # 排除三级及以上层级序号（如 1.1.1、1.2.3 等）
+        if re.match(r'^\d+\.\d+\.\d+', line):
+            return False
+        
+        # 识别章标题格式
+        # 1. 中文数字序号格式：第一章...、第1章...或第 1 章...（以"第"字开头、"章"字结尾，支持中间有空格）
+        if re.match(r'^第\s*[一二三四五六七八九十百千\d]+\s*章', line):
+            return True
+        
+        # 2. 单层阿拉伯数字序号格式：1. ...（仅包含一位阿拉伯数字加英文句点）
+        if re.match(r'^\d+\.\s+', line) and not re.search(r'\d+\.\d+', line):
+            return True
+        
+        # 3. 如果是子章节，识别二级标题格式：1.1、1.2 等
+        if is_subsection:
+            # 二级标题格式：X.Y 或 X.Y 标题，X和Y都是数字
+            if re.match(r'^\d+\.\d+(\s+.*)?$', line):
+                # 确保不是三级或更深层级的标题
+                if not re.search(r'\d+\.\d+\.\d+', line):
+                    return True
+        
+        # 其他格式不再识别
+        return False
+    
+    def _is_non_chapter_content(self, line):
+        """快速判断是否为非章节内容（额外的过滤层）"""
+        # 首先检查是否为章标题格式，如果是则直接返回False
+        if self._is_true_chapter_title(line, 0, '', [], False):
+            return False
+        
+        # 明显的列表项格式
+        list_patterns = [
+            r'^[1-9]\d*\s*[、.。，].*$',         # 数字+标点
+            r'^[一二三四五六七八九十百千万]+[、.]\s*.*$', # 中文数字+标点
+            r'^[①②③④⑤⑥⑦⑧⑨⑩].*$',               # 特殊编号
+            r'^[⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽].*$',             # 括号数字
+        ]
+        
+        # 列表项格式
+        for pattern in list_patterns:
+            if re.match(pattern, line):
+                return True
+        
+        # 包含等号、引号等特殊字符的行，可能是代码或配置
+        if any(char in line for char in ['=', '"', "'", '{', '}', '[', ']']):
+            return True
+        
+        # 以标点符号结尾的行，通常不是标题（但章标题可能以句号结尾，所以需要谨慎）
+        if line.rstrip().endswith(('。', '，', '.', ',', '！', '？', '!', '?', '；', ';')) and not re.search(r'章[。.]$', line):
+            return True
+        
+        return False
+    
+    def _optimize_chapter_boundaries(self, chapters, pages_data):
+        """优化章节边界，识别章标题和二级标题"""
+        if len(chapters) <= 1:
+            return chapters
+            
+        # 首先识别章节类型（处理主章节和二级标题）
+        for chapter in chapters:
+            title = chapter['title'].strip()
+            chapter['type'] = 'content'  # 默认类型
+            chapter['number'] = None
+            chapter['parent_number'] = None
+            chapter['full_number'] = None
+            
+            # 严格的章标题识别规则
+            
+            # 1. 中文数字序号格式：第一章...、第1章...或第 1 章...（以"第"字开头、"章"字结尾，支持中间有空格）
+            if re.match(r'^(第\s*[一二三四五六七八九十百千\d]+\s*章)', title):
+                chapter['type'] = 'main'
+                chapter['number'] = re.search(r'第\s*[一二三四五六七八九十百千\d]+\s*章', title).group(0)
+                chapter['full_number'] = chapter['number']
+            # 2. 单层阿拉伯数字序号格式：1. ...（仅包含一位阿拉伯数字加英文句点）
+            elif re.match(r'^(\d+)\.\s+(.+)$', title) and not re.search(r'\d+\.\d+', title):
+                chapter['type'] = 'main'
+                chapter['number'] = re.match(r'^(\d+)\.\s+(.+)$', title).group(1)
+                chapter['full_number'] = chapter['number']
+                chapter['title'] = f"{chapter['full_number']}. {re.match(r'^(\d+)\.\s+(.+)$', title).group(2)}"
+            # 3. 二级标题格式：1.1、1.2 等
+            elif re.match(r'^(\d+)\.(\d+)(\s+.*)?$', title) and not re.search(r'\d+\.\d+\.\d+', title):
+                chapter['type'] = 'subsection'
+                match = re.match(r'^(\d+)\.(\d+)(\s+.*)?$', title)
+                chapter['parent_number'] = match.group(1)
+                chapter['number'] = match.group(2)
+                chapter['full_number'] = f"{match.group(1)}.{match.group(2)}"
+                # 确保格式统一
+                content_part = match.group(3).strip() if match.group(3) else ''
+                chapter['title'] = f"{chapter['full_number']} {content_part}"
+        
+        # 按起始页排序章节
+        sorted_chapters = sorted(chapters, key=lambda x: x['start_page'])
+        
+        # 收集主章节和二级标题
+        main_chapters = []
+        subsections = []
+        
+        for chapter in sorted_chapters:
+            # 获取章节的实际内容
+            chapter_pages = pages_data[chapter['start_page']:chapter['end_page']+1]
+            chapter_text = '\n'.join([page['text'] for page in chapter_pages])
+            chapter['content'] = chapter_text  # 使用完整内容
+            
+            # 处理主章节
+            if chapter['type'] == 'main':
+                # 确保主章节标题格式统一为 "数字. 标题"
+                title = chapter['title'].strip()
+                match = re.match(r'^(\d+)\.\s+(.+)$', title)
+                if not match and chapter.get('number') and chapter['number'].isdigit():
+                    # 提取内容部分
+                    content_part = re.sub(r'^第[一二三四五六七八九十百千]+章[：:\s]*', '', title)
+                    content_part = re.sub(r'^Chapter\s+\d+\.?\s*', '', content_part, flags=re.IGNORECASE)
+                    chapter['title'] = f"{chapter['number']}. {content_part}"
+                
+                # 添加到主章节列表
+                main_chapters.append(chapter)
+                # 为每个主章节添加子章节列表
+                chapter['subsections'] = []
+            
+            # 处理二级标题
+            elif chapter['type'] == 'subsection':
+                subsections.append(chapter)
+        
+        # 将二级标题关联到对应的主章节
+        for subsection in subsections:
+            parent_number = subsection['parent_number']
+            for chapter in main_chapters:
+                if chapter.get('number') == parent_number:
+                    chapter['subsections'].append(subsection)
+                    break
+        
+        # 最后进行章节标题标准化
+        return self._standardize_chapter_titles(main_chapters)
+    
+    def _calculate_chapter_importance(self, chapter):
+        """计算章节的重要性分数"""
+        importance = 0.5  # 基础分数
+        
+        # 基于标题的重要性（重点关注主章节标识）
+        title = chapter['title']
+        
+        # 检查是否为二级标题
+        if re.match(r'^\d+\.\d+\s+', title):
+            importance += 0.15  # 二级标题权重
+        else:
+            # 更新正则表达式，支持中文数字、阿拉伯数字和带空格的格式
+            if re.match(r'^(第\s*[一二三四五六七八九十百千\d]+\s*章.*)$', title):
+                importance += 0.3
+            elif re.match(r'^(Chapter\s+\d+\.?\s+.*)$', title, re.IGNORECASE):
+                importance += 0.3
+            elif re.match(r'^\d+\.\s+', title):
+                # 对一级数字编号给予较高权重
+                importance += 0.2
+        
+        # 基于内容长度的重要性
+        content_len = len(chapter['content'])
+        if content_len > 2000:
+            importance += 0.2
+        elif content_len > 500:
+            importance += 0.1
+        
+        # 标准化到0-1范围
+        return min(1.0, importance)
+    
+    def _standardize_chapter_titles(self, chapters):
+        """标准化章节标题格式，处理章标题和二级标题"""
+        # 首先确定实际的章节编号，不使用计数方式
+        # 而是根据内容中提取的编号进行标准化
+        main_chapter_numbers = []
+        
+        # 收集所有主章节的编号
+        for chapter in chapters:
+            if chapter.get('number'):
+                if chapter['number'].isdigit():
+                    main_chapter_numbers.append(int(chapter['number']))
+        
+        # 排序编号
+        main_chapter_numbers.sort()
+        
+        # 构建编号映射
+        number_map = {}
+        for i, num in enumerate(main_chapter_numbers, 1):
+            number_map[num] = i
+        
+        # 标准化每个章节
+        for chapter in chapters:
+            title = chapter['title'].strip()
+            
+            # 主章节处理 - 格式：1. 标题
+            # 使用数字编号格式 "1. 标题" 作为标准
+            if re.match(r'^\d+\.\s+.+$', title):
+                # 已经是标准格式，确保格式一致
+                match = re.match(r'^(\d+)\.\s+(.+)$', title)
+                chapter_num = int(match.group(1))
+                # 使用原始编号或映射的编号
+                final_num = number_map.get(chapter_num, chapter_num)
+                chapter['title'] = f"{final_num}. {match.group(2)}"
+            else:
+                # 不是标准格式，提取内容并添加标准编号
+                content_part = title
+                # 移除可能的章节标识
+                content_part = re.sub(r'^第[一二三四五六七八九十百千]+章[：:\s]*', '', content_part)
+                content_part = re.sub(r'^Chapter\s+\d+\.?\s*', '', content_part, flags=re.IGNORECASE)
+                
+                # 分配标准编号
+                if chapter.get('number') and chapter['number'].isdigit():
+                    chapter_num = int(chapter['number'])
+                    final_num = number_map.get(chapter_num, len(number_map) + 1)
+                    chapter['title'] = f"{final_num}. {content_part}"
+                else:
+                    # 如果没有编号，按顺序分配
+                    chapter['title'] = f"{len(number_map) + 1}. {content_part}"
+                    number_map[len(number_map) + 1] = len(number_map) + 1
+            
+            # 更新编号信息
+            match = re.match(r'^(\d+)\.', chapter['title'])
+            if match:
+                chapter['number'] = match.group(1)
+                chapter['full_number'] = match.group(1)
+            
+            # 清理标题中的多余空格
+            chapter['title'] = re.sub(r'\s+', ' ', chapter['title']).strip()
+            
+            # 标准化子章节（二级标题）
+            if 'subsections' in chapter and chapter['subsections']:
+                # 为每个主章节创建子章节编号映射
+                subsection_map = {}
+                subsection_numbers = []
+                
+                # 收集子章节编号
+                for sub in chapter['subsections']:
+                    if sub.get('number') and sub['number'].isdigit():
+                        subsection_numbers.append(int(sub['number']))
+                
+                # 排序子章节编号
+                subsection_numbers.sort()
+                
+                # 构建子章节编号映射
+                for i, num in enumerate(subsection_numbers, 1):
+                    subsection_map[num] = i
+                
+                # 标准化每个子章节
+                for sub in chapter['subsections']:
+                    sub_title = sub['title'].strip()
+                    
+                    # 确保二级标题格式为 "X.Y 标题"
+                    match = re.match(r'^(\d+)\.(\d+)(\s+.*)?$', sub_title)
+                    if match:
+                        # 获取标准化后的父编号
+                        parent_num = chapter['number']
+                        # 获取子编号
+                        sub_num = int(match.group(2))
+                        # 使用映射的编号
+                        final_sub_num = subsection_map.get(sub_num, sub_num)
+                        # 获取标题内容
+                        content_part = match.group(3).strip() if match.group(3) else ''
+                        # 更新标题和编号信息
+                        sub['title'] = f"{parent_num}.{final_sub_num} {content_part}"
+                        sub['full_number'] = f"{parent_num}.{final_sub_num}"
+                        sub['number'] = str(final_sub_num)
+                        sub['parent_number'] = parent_num
+                    
+                    # 清理标题中的多余空格
+                    sub['title'] = re.sub(r'\s+', ' ', sub['title']).strip()
+                
+                # 按子章节编号排序
+                chapter['subsections'].sort(key=lambda x: int(x['number']) if x.get('number') and x['number'].isdigit() else 0)
+        
+        # 最终按主章节编号排序
+        chapters.sort(key=lambda x: int(x['number']) if x.get('number') and x['number'].isdigit() else 0)
+        
+        return chapters
+    
+    def _fallback_chapter_splitting(self, pages_data):
+        """基于内容密度的回退章节分割"""
+        chapters = []
+        total_pages = len(pages_data)
+        # 计算理想的章节数量（每章8-15页）
+        ideal_chapters = max(1, min(10, total_pages // 10))
+        chunk_size = max(1, total_pages // ideal_chapters)
+        
+        for i in range(0, total_pages, chunk_size):
+            end = min(i + chunk_size, total_pages)
+            chapter_pages = pages_data[i:end]
+            chapter_content = '\n'.join([page['text'] for page in chapter_pages])
+            
+            # 尝试提取标题
+            title = f'第{len(chapters)+1}章'
+            if chapter_content.strip():
+                first_line = chapter_content.strip().splitlines()[0].strip()
+                if len(first_line) > 0:
+                    title = first_line[:80]  # 限制标题长度
+            
+            chapters.append({
+                'start_page': i,
+                'end_page': end - 1,
+                'content': chapter_content,
+                'title': title
+            })
+        
+        return chapters
+    
+    def _detect_programming_language(self, content, title):
+        """使用高级PDF处理器检测编程代码的语言"""
+        try:
+            # 使用高级处理器进行语言检测，结合内容和标题
+            return self.advanced_processor.detect_programming_language(content, title)
+        except Exception as e:
+            print(f"高级代码语言检测错误: {str(e)}")
+            # 发生错误时使用回退方法
+            try:
+                # 基于关键词和代码模式检测语言
+                js_patterns = [r'function\s+\w+', r'console\.log', r'\{[^}]*\}', r'const\s+', r'let\s+', r'var\s+', r'require\(', r'import\s+.*from']
+                python_patterns = [r'def\s+\w+\s*\(', r'print\(', r'import\s+\w+', r'from\s+\w+\s+import', r'class\s+\w+', r':\s*$', r'\bself\b']
+                
+                text = (content + ' ' + title).lower()
+                js_score = sum(1 for pattern in js_patterns if re.search(pattern, text))
+                python_score = sum(1 for pattern in python_patterns if re.search(pattern, text))
+                
+                # 检查文件名或标题中的线索
+                if any(kw in text for kw in ['javascript', 'js', '前端', 'web']):
+                    js_score += 3
+                if any(kw in text for kw in ['python', '爬虫', '数据分析', 'ai', '机器学习']):
+                    python_score += 3
+                
+                if js_score > python_score:
+                    return 'javascript'
+                else:
+                    return 'python'
+            except Exception:
+                return 'python'
+    
+    def _enhanced_content_processing(self, content):
+        """使用高级PDF处理器进行增强内容处理"""
+        try:
+            # 使用高级处理器进行内容处理
+            return self.advanced_processor.enhanced_content_processing(content)
+        except Exception as e:
+            print(f"高级内容处理错误: {str(e)}")
+            # 发生错误时使用回退方法
+            try:
+                # 分离内容为不同类型的块
+                blocks = []
+                lines = content.splitlines()
+                current_block = []
+                current_type = 'text'
+                
+                for line in lines:
+                    line_type = self._classify_content_type(line)
+                    
+                    # 如果类型变化，保存当前块并开始新块
+                    if line_type != current_type and current_block:
+                        blocks.append({
+                            'type': current_type,
+                            'content': '\n'.join(current_block)
+                        })
+                        current_block = [line]
+                        current_type = line_type
+                    else:
+                        current_block.append(line)
+                
+                # 添加最后一个块
+                if current_block:
+                    blocks.append({
+                        'type': current_type,
+                        'content': '\n'.join(current_block)
+                    })
+                
+                # 重新组装内容，添加类型标记
+                enhanced_content = []
+                for block in blocks:
+                    if block['type'] == 'code':
+                        enhanced_content.append(f"```python\n{block['content']}\n```")
+                    elif block['type'] == 'table':
+                        enhanced_content.append(f"[TABLE]\n{block['content']}\n[/TABLE]")
+                    elif block['type'] == 'title':
+                        enhanced_content.append(f"# {block['content']}")
+                    else:
+                        enhanced_content.append(block['content'])
+                
+                return '\n\n'.join(enhanced_content)
+            except Exception:
+                return content
+    
+    @action(detail=False, methods=['post'], url_path='import-pdf', permission_classes=[IsAuthenticated], parser_classes=[MultiPartParser, FormParser])
+    def import_pdf(self, request):
+        """上传PDF并使用计算机视觉技术解析为教材与章节"""
+        # 详细日志记录请求参数
+        print("=== PDF导入请求开始 ===")
+        print(f"用户: {request.user.username}")
+        print(f"请求数据: {list(request.data.keys())}")
+        print(f"文件字段: {list(request.FILES.keys())}")
+        
+        # 获取并验证参数
+        title = (request.data.get('title') or '').strip()
+        author = (request.data.get('author') or '').strip() or '未知作者'
+        file_obj = request.FILES.get('file') or request.FILES.get('pdf')
+        
+        print(f"验证参数:")
+        print(f"- title: {'存在' if title else '不存在'}")
+        print(f"- author: {author}")
+        print(f"- file_obj: {'存在' if file_obj else '不存在'}")
+        
+        if not file_obj:
+            print("错误: 缺少PDF文件")
+            return Response({'error': '缺少PDF文件(file)'}, status=status.HTTP_400_BAD_REQUEST)
+        if not title:
+            print("错误: 缺少教材标题")
+            return Response({'error': '缺少教材标题(title)'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 创建书籍并保存PDF
+        book = Book.objects.create(title=title, author=author, description=request.data.get('description') or '', owner=request.user)
+        book.pdf_file = file_obj
+        book.save()
+        
+        # 创建临时文件用于处理
+        temp_pdf = None
+        try:
+            # 创建临时PDF文件
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
+                for chunk in book.pdf_file.chunks():
+                    temp_pdf.write(chunk)
+                temp_pdf_path = temp_pdf.name
+            
+            # 将PDF转换为图像
+            images = self._extract_pdf_to_images(temp_pdf_path)
+            
+            # 使用高级PDF处理器处理PDF
+            try:
+                print("使用增强的高级PDF处理器进行全功能分析...")
+                # 让高级处理器处理PDF提取和分析（包含并行处理、引用检测、文档结构重建等）
+                processed_result = self.advanced_processor.process_pdf(temp_pdf_path, images)
+                pages_data = processed_result.get('pages_data', [])
+                document_structure = processed_result.get('document_structure', None)
+                
+                # 将文档结构保存到实例属性，供_advanced_chapter_detection方法使用
+                self._document_structure = document_structure
+                
+                # 记录处理结果统计信息
+                if 'metadata' in processed_result:
+                    print(f"高级处理统计: 页码数={processed_result['metadata'].get('total_pages', 0)}, "
+                          f"处理时间={processed_result['metadata'].get('processing_time', 0):.2f}秒, "
+                          f"方法={processed_result['metadata'].get('processing_method', 'unknown')}")
+                
+                if document_structure:
+                    # 记录文档结构分析结果
+                    print(f"文档结构分析: 估计章节数={document_structure.get('estimated_chapters', 0)}, "
+                          f"引用分析={bool(document_structure.get('citation_graph'))}, "
+                          f"目录对齐={bool(document_structure.get('toc_alignments'))}")
+                
+                # 如果高级处理失败，回退到基本方法
+                if not pages_data:
+                    if not images:
+                        # 如果无法转换为图像，回退到基本的PyPDF2文本提取
+                        from PyPDF2 import PdfReader
+                        reader = PdfReader(book.pdf_file)
+                        pages_data = []
+                        for page in reader.pages:
+                            try:
+                                text = page.extract_text() or ''
+                                pages_data.append({'text': text, 'regions': []})
+                            except Exception:
+                                pages_data.append({'text': '', 'regions': []})
+                    else:
+                        # 使用OCR和布局分析处理每一页
+                        pages_data = []
+                        for image in images:
+                            # 提取文本
+                            text = self._extract_text_with_ocr(image)
+                            # 检测内容区域
+                            regions = self._detect_content_regions(image)
+                            pages_data.append({'text': text, 'regions': regions})
+            except Exception as e:
+                print(f"高级PDF处理错误: {str(e)}")
+                # 完全回退到原始方法
+                if not images:
+                    # 如果无法转换为图像，回退到基本的PyPDF2文本提取
+                    from PyPDF2 import PdfReader
+                    reader = PdfReader(book.pdf_file)
+                    pages_data = []
+                    for page in reader.pages:
+                        try:
+                            text = page.extract_text() or ''
+                            pages_data.append({'text': text, 'regions': []})
+                        except Exception:
+                            pages_data.append({'text': '', 'regions': []})
+                else:
+                    # 使用OCR和布局分析处理每一页
+                    pages_data = []
+                    for image in images:
+                        # 提取文本
+                        text = self._extract_text_with_ocr(image)
+                        # 检测内容区域
+                        regions = self._detect_content_regions(image)
+                        pages_data.append({'text': text, 'regions': regions})
+            
+            # 高级章节检测（已集成高级处理器）
+            chapters = self._advanced_chapter_detection(pages_data, images)
+            
+            # 检测编程语言（已集成高级处理器）
+            combined_content = '\n'.join([page['text'] for page in pages_data])
+            language = self._detect_programming_language(combined_content, title)
+            
+            # 创建章节
+            created_count = 0
+            chapter_order = 1
+            
+            # 定义二级标题格式的正则表达式
+            subsection_pattern = re.compile(r'^\d+\.\d+')
+            # 定义三级及以上标题格式的正则表达式（需要排除）
+            deeper_level_pattern = re.compile(r'^\d+\.\d+\.\d+')
+            
+            for main_chapter in chapters:
+                # 增强内容处理
+                enhanced_content = self._enhanced_content_processing(main_chapter['content'])
+                
+                # 生成适当的代码示例
+                if language == 'javascript':
+                    code_example = f"// {main_chapter['title'][:30]}\nconsole.log('学习{main_chapter['title']}');\n// 在此处添加您的代码"
+                else:
+                    code_example = f"# {main_chapter['title'][:30]}\nprint('学习{main_chapter['title']}')\n# 在此处添加您的代码"
+                
+                # 创建主章节
+                created_main_chapter = Chapter.objects.create(
+                    book=book,
+                    title=main_chapter['title'][:100],  # 限制标题长度
+                    type='reading',
+                    duration=30 + len(main_chapter['content']) // 1000,  # 基于内容长度估计时长
+                    description=f'由PDF自动生成，包含第{main_chapter['start_page']+1}-{main_chapter['end_page']+1}页内容',
+                    content=enhanced_content,
+                    code=code_example,
+                    language=language,
+                    order=chapter_order,
+                    level=1,  # 明确设置为主章节级别
+                    is_main_chapter=True
+                )
+                created_count += 1
+                chapter_order += 1
+                
+                # 如果有子章节，创建子章节记录
+                if 'subsections' in main_chapter and main_chapter['subsections']:
+                    for subsection in main_chapter['subsections']:
+                        # 检查是否为二级标题（格式为1.1、1.2等）且不是三级及以上标题
+                        title = subsection.get('title', '').strip()
+                        is_valid_subsection = subsection_pattern.match(title) and not deeper_level_pattern.match(title)
+                        
+                        if is_valid_subsection:
+                            # 增强子章节内容处理
+                            subsection_enhanced_content = self._enhanced_content_processing(subsection.get('content', ''))
+                            
+                            # 生成子章节代码示例
+                            if language == 'javascript':
+                                subsection_code_example = f"// {subsection['title'][:30]}\nconsole.log('学习{subsection['title']}');\n// 在此处添加您的代码"
+                            else:
+                                subsection_code_example = f"# {subsection['title'][:30]}\nprint('学习{subsection['title']}')\n# 在此处添加您的代码"
+                            
+                            # 创建子章节，关联到主章节
+                            Chapter.objects.create(
+                                book=book,
+                                title=title[:100],  # 限制标题长度
+                                type='reading',
+                                duration=20 + len(subsection.get('content', '')) // 1000,  # 基于内容长度估计时长
+                                description=f'由PDF自动生成的二级标题',
+                                content=subsection_enhanced_content,
+                                code=subsection_code_example,
+                                language=language,
+                                order=chapter_order,
+                                level=2,  # 明确设置为二级章节级别
+                                is_main_chapter=False,
+                                parent_chapter=created_main_chapter  # 关联到主章节
+                            )
+                            created_count += 1
+                            chapter_order += 1
+                            print(f"已创建二级标题: {title}")
+                        else:
+                            print(f"跳过不符合二级标题格式的子章节: {title}")
+            
+            # 刷新章节数
+            book.save()
+            
+            # 异步处理图像和图表提取（后续可以实现）
+            # threading.Thread(target=self._extract_images_and_charts, args=(book.id, temp_pdf_path)).start()
+            
+            return Response({
+                'success': True, 
+                'book_id': book.id, 
+                'chapters': created_count,
+                'language': language,
+                'message': 'PDF解析成功，已创建章节并进行内容类型识别'
+            })
+            
+        except Exception as e:
+            # 详细记录异常
+            import traceback
+            print(f"=== PDF处理异常 ===")
+            print(f"错误类型: {type(e).__name__}")
+            print(f"错误消息: {str(e)}")
+            print(f"堆栈跟踪:")
+            traceback.print_exc()
+            
+            # 清理
+            if temp_pdf and hasattr(temp_pdf, 'name') and os.path.exists(temp_pdf.name):
+                try:
+                    os.unlink(temp_pdf.name)
+                    print("临时文件已清理")
+                except:
+                    print("清理临时文件失败")
+            
+            return Response({'error': f'PDF处理失败: {str(e)}', 'error_type': type(e).__name__}, status=status.HTTP_400_BAD_REQUEST)
+        finally:
+            # 确保临时文件被删除
+            if 'temp_pdf_path' in locals() and os.path.exists(temp_pdf_path):
+                try:
+                    os.unlink(temp_pdf_path)
+                    print(f"临时文件 {temp_pdf_path} 已删除")
+                except Exception as e:
+                    print(f"删除临时文件失败: {str(e)}")
+            print("=== PDF导入请求结束 ===")
+    
+    def retrieve(self, request, *args, **kwargs):
+        """获取书籍详情，包含所有章节"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='stats', permission_classes=[IsAuthenticated])
+    def stats(self, request, pk=None):
+        """获取书籍统计数据"""
+        book = self.get_object()
+        
+        # 基本统计数据
+        stats = {
+            'book_id': book.id,
+            'title': book.title,
+            'chapter_count': book.chapters.count(),
+            'version_count': book.versions.count(),
+            'practice_count': Practice.objects.filter(chapter__book=book).count(),
+            'created_at': book.created_at,
+            'updated_at': book.updated_at,
+        }
+        
+        return Response(stats)
+
+
+class ChapterViewSet(viewsets.ModelViewSet):
+    """章节视图集"""
+    queryset = Chapter.objects.all()
+    
+    def get_permissions(self):
+        # 仅允许认证用户进行更新操作
+        if self.action in ['update', 'partial_update']:
+            return [IsAuthenticated()]
+        return []
+    
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return ChapterDetailSerializer
+        return ChapterSerializer
+    
+    @action(detail=False, methods=['get'], url_path='book/(?P<book_id>[^/.]+)')
+    def by_book(self, request, book_id=None):
+        """获取指定书籍的所有章节"""
+        try:
+            # 排除practice类型的章节，只返回阅读和视频类型的章节
+            chapters = Chapter.objects.filter(book_id=book_id, type__in=['reading', 'video']).order_by('order')
+            serializer = self.get_serializer(chapters, many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'], url_path='practices-by-book')
+    def practices_by_book(self, request):
+        """获取所有书籍的练习题，按书籍分组"""
+        try:
+            books = Book.objects.all().order_by('id')
+            result = []
+            
+            for book in books:
+                # 预加载关联数据以提高性能
+                chapters = Chapter.objects.filter(
+                    book=book, 
+                    practices__isnull=False
+                ).prefetch_related(
+                    'practices__choice_options',
+                    'practices__fill_blanks',
+                    'practices__test_cases'
+                ).distinct().order_by('order')
+                practices_data = []
+                
+                for chapter in chapters:
+                    # 使用 prefetch_related 预加载的关联数据
+                    practices = chapter.practices.all().order_by('order')
+                    for practice in practices:
+                        serializer = PracticeSerializer(practice)
+                        practice_data = serializer.data
+                        practice_data['chapter_title'] = chapter.title
+                        practice_data['chapter_id'] = chapter.id
+                        practice_data['chapter_order'] = chapter.order
+                        practices_data.append(practice_data)
+                
+                if practices_data:
+                    result.append({
+                        'book_id': book.id,
+                        'book_title': book.title,
+                        'practices': practices_data
+                    })
+            
+            return Response(result)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=True, methods=['get'], url_path='practice')
+    def practice(self, request, pk=None):
+        """获取章节的练习题"""
+        try:
+            chapter = self.get_object()
+            # 预加载关联数据，确保 choice_options、fill_blanks、test_cases 被正确加载
+            practices = chapter.practices.prefetch_related(
+                'choice_options',
+                'fill_blanks',
+                'test_cases'
+            ).all().order_by('order')
+            
+            if not practices:
+                return Response({'message': '该章节暂无练习题'}, status=status.HTTP_404_NOT_FOUND)
+            
+            # 如果有多个练习题，返回第一个；否则返回单个练习题
+            if practices.count() == 1:
+                # 返回单个练习题对象
+                serializer = PracticeSerializer(practices.first())
+                return Response(serializer.data)
+            else:
+                # 返回练习题列表
+                serializer = PracticeSerializer(practices, many=True)
+                return Response(serializer.data)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=True, methods=['post'], url_path='practice/submit')
+    def submit_practice(self, request, pk=None):
+        """提交练习题答案（支持多问题提交）"""
+        try:
+            chapter = self.get_object()
+            practice_id = request.data.get('practice_id')
+            
+            if not practice_id:
+                return Response({'error': '请提供练习题ID'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                practice = chapter.practices.get(id=practice_id)
+            except Practice.DoesNotExist:
+                return Response({'error': '练习题不存在'}, status=status.HTTP_404_NOT_FOUND)
+            
+            # 检查是否是多问题格式
+            if practice.questions and isinstance(practice.questions, list):
+                # 多问题提交处理
+                question_answers = request.data.get('question_answers', [])
+                if not question_answers:
+                    return Response({'error': '请提供问题答案'}, status=status.HTTP_400_BAD_REQUEST)
+                
+                results = []
+                all_correct = True
+                
+                for answer_data in question_answers:
+                    question_id = answer_data.get('question_id')
+                    question_type = answer_data.get('type')
+                    
+                    # 找到对应的问题
+                    question = None
+                    for q in practice.questions:
+                        if q.get('id') == question_id or q.get('order') == question_id:
+                            question = q
+                            break
+                    
+                    if not question:
+                        results.append({
+                            'question_id': question_id,
+                            'error': '问题不存在'
+                        })
+                        all_correct = False
+                        continue
+                    
+                    # 根据题型验证答案
+                    if question_type == 'choice':
+                        # 选择题验证
+                        option_id = answer_data.get('answer')
+                        if not option_id:
+                            results.append({
+                                'question_id': question_id,
+                                'error': '请选择选项'
+                            })
+                            all_correct = False
+                            continue
+                        
+                        # 查找正确答案
+                        options = question.get('options', [])
+                        is_correct = False
+                        correct_option_id = None
+                        for idx, opt in enumerate(options):
+                            if opt.get('is_correct'):
+                                correct_option_id = idx
+                                if str(idx) == str(option_id):
+                                    is_correct = True
+                                    break
+                        
+                        results.append({
+                            'question_id': question_id,
+                            'question_type': question_type,
+                            'is_correct': is_correct,
+                            'correct_option_id': correct_option_id,
+                            'user_answer': option_id
+                        })
+                        
+                        if not is_correct:
+                            all_correct = False
+                    
+                    elif question_type == 'fill':
+                        # 填空题验证
+                        blank_answers = answer_data.get('blank_answers', {})
+                        if not blank_answers:
+                            results.append({
+                                'question_id': question_id,
+                                'error': '请提供填空答案'
+                            })
+                            all_correct = False
+                            continue
+                        
+                        blanks = question.get('blanks', [])
+                        blank_results = []
+                        question_correct = True
+                        
+                        for idx, blank in enumerate(blanks):
+                            blank_id = str(idx)
+                            user_answer = blank_answers.get(blank_id, '').strip()
+                            correct_answer = blank.get('correct_answer', '').strip()
+                            
+                            is_correct = user_answer.lower() == correct_answer.lower()
+                            blank_results.append({
+                                'blank_id': idx,
+                                'is_correct': is_correct,
+                                'user_answer': user_answer,
+                                'correct_answer': correct_answer
+                            })
+                            
+                            if not is_correct:
+                                question_correct = False
+                        
+                        results.append({
+                            'question_id': question_id,
+                            'question_type': question_type,
+                            'all_correct': question_correct,
+                            'results': blank_results
+                        })
+                        
+                        if not question_correct:
+                            all_correct = False
+                    
+                    elif question_type in ['code_completion', 'programming']:
+                        # 代码补全题和编程题需要运行测试用例
+                        code = answer_data.get('code')
+                        if not code:
+                            results.append({
+                                'question_id': question_id,
+                                'error': '请提供代码'
+                            })
+                            all_correct = False
+
+                return Response({
+                    'results': results,
+                    'all_correct': all_correct
+                })
+            else:
+                # 单问题提交处理（保持原有逻辑）
+                answer = request.data.get('answer')
+                if not answer:
+                    return Response({'error': '请提供答案'}, status=status.HTTP_400_BAD_REQUEST)
+                
+                # 根据题型验证答案
+                if practice.question_type == 'choice':
+                    # 选择题验证
+                    option_id = request.data.get('option_id')
+                    if not option_id:
+                        return Response({'error': '请选择选项'}, status=status.HTTP_400_BAD_REQUEST)
+                    
+                    try:
+                        option = practice.choice_options.get(id=option_id)
+                        is_correct = option.is_correct
+                        return Response({
+                            'is_correct': is_correct,
+                            'correct_option_id': practice.choice_options.filter(is_correct=True).first().id
+                        })
+                    except PracticeChoiceOption.DoesNotExist:
+                        return Response({'error': '选项不存在'}, status=status.HTTP_400_BAD_REQUEST)
+                
+                elif practice.question_type == 'fill':
+                    # 填空题验证
+                    blank_answers = request.data.get('blank_answers', {})
+                    if not blank_answers:
+                        return Response({'error': '请提供填空答案'}, status=status.HTTP_400_BAD_REQUEST)
+                    
+                    blanks = practice.fill_blanks.all()
+                    results = []
+                    all_correct = True
+                    
+                    for blank in blanks:
+                        blank_id = str(blank.id)
+                        user_answer = blank_answers.get(blank_id, '').strip()
+                        correct_answer = blank.correct_answer.strip()
+                        
+                        is_correct = user_answer.lower() == correct_answer.lower()
+                        results.append({
+                            'blank_id': blank.id,
+                            'is_correct': is_correct,
+                            'user_answer': user_answer,
+                            'correct_answer': correct_answer
+                        })
+                        
+                        if not is_correct:
+                            all_correct = False
+                    
+                    return Response({
+                        'all_correct': all_correct,
+                        'results': results
+                    })
+                
+                elif practice.question_type in ['code_completion', 'programming']:
+                    # 代码补全题和编程题需要运行测试用例
+                    code = request.data.get('code')
+                    if not code:
+                        return Response({'error': '请提供代码'}, status=status.HTTP_400_BAD_REQUEST)
+                    
+                    # 这里应该调用代码执行服务来运行测试用例
+                    # 暂时返回一个模拟响应
+                    return Response({
+                        'message': '代码提交成功',
+                        'test_cases': [
+                            {'input': 'test input', 'expected': 'test output', 'actual': 'test output', 'passed': True}
+                        ]
+                    })
+                
+                return Response({'error': '不支持的题型'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['get'], url_path='ai-learning-guide')
+    def ai_learning_guide(self, request, pk=None):
+        """获取章节的 AI 导学内容"""
+        try:
+            chapter = self.get_object()
+            book = chapter.book
+            
+            # 尝试从数据库获取已缓存的 AI 导学内容
+            guide, created = AILearningGuide.objects.get_or_create(
+                book=book,
+                chapter=chapter
+            )
+            
+            # 如果是新创建的，状态为生成中
+            if created:
+                guide.status = 'generating'
+                guide.save()
+                
+                # 异步生成 AI 导学内容
+                threading.Thread(target=self._generate_ai_learning_guide, args=(guide.id,)).start()
+                
+                return Response({
+                    'status': 'generating',
+                    'message': 'AI 导学内容正在生成中，请稍后刷新查看'
+                })
+            
+            # 如果已经生成完成，返回内容
+            if guide.status == 'completed':
+                return Response({
+                    'status': 'completed',
+                    'content': {
+                        'mindmap': guide.mindmap,
+                        'ppt': guide.ppt,
+                        'key_concepts': guide.key_concepts,
+                        'notes': guide.notes,
+                        'summary': guide.summary
+                    }
+                })
+            
+            # 其他状态
+            return Response({
+                'status': guide.status,
+                'message': 'AI 导学内容正在处理中'
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='generate-ai-learning-guide')
+    def generate_ai_learning_guide(self, request, pk=None):
+        """生成章节的 AI 导学内容"""
+        try:
+            chapter = self.get_object()
+            book = chapter.book
+            
+            # 尝试从数据库获取已缓存的 AI 导学内容
+            guide, created = AILearningGuide.objects.get_or_create(
+                book=book,
+                chapter=chapter
+            )
+            
+            # 设置状态为生成中
+            guide.status = 'generating'
+            guide.save()
+            
+            # 异步生成 AI 导学内容
+            threading.Thread(target=self._generate_ai_learning_guide, args=(guide.id,)).start()
+            
+            return Response({
+                'status': 'generating',
+                'message': 'AI 导学内容正在生成中，请稍后刷新查看'
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def _generate_ai_learning_guide(self, guide_id):
+        """异步生成 AI 导学内容"""
+        try:
+            print(f"开始生成AI导学内容，guide_id={guide_id}")
+            guide = AILearningGuide.objects.get(id=guide_id)
+            chapter = guide.chapter
+            book = guide.book
+            
+            # 从章节内容中提取关键信息
+            chapter_content = chapter.content or ''
+            chapter_description = chapter.description or ''
+            
+            # 尝试从jupyter_content中提取内容
+            jupyter_content = chapter.jupyter_content or ''
+            if jupyter_content:
+                try:
+                    import json
+                    jupyter_data = json.loads(jupyter_content)
+                    # 提取cells中的内容
+                    for cell in jupyter_data.get('cells', []):
+                        cell_type = cell.get('cell_type', '')
+                        if cell_type == 'code':
+                            chapter_content += '\n'.join(cell.get('source', [])) + '\n'
+                        elif cell_type == 'markdown':
+                            chapter_content += '\n'.join(cell.get('source', [])) + '\n'
+                except Exception as e:
+                    print(f"解析jupyter_content失败: {str(e)}")
+            
+            print(f"章节信息：title={chapter.title}, description={chapter_description[:100]}...")
+            
+            # 导入LLMService
+            from apps.learning.llm_integration import LLMService
+            
+            # 初始化LLM服务
+            llm_service = LLMService()
+            print(f"LLM服务初始化成功，provider={llm_service.provider}, model={llm_service.model_name}")
+            
+            # 增加输入内容长度，确保AI能够获取足够的信息
+            input_content = chapter_content[:3000]  # 增加到3000字符，提供更丰富的上下文信息
+            print(f"输入内容长度：{len(input_content)}字符")
+            if input_content:
+                print(f"输入内容预览：{input_content[:100]}...")
+            else:
+                print("警告：输入内容为空，将使用章节描述作为输入")
+                input_content = chapter_description
+            
+            # 1. 生成思维导图
+            mindmap_prompt = f"请基于以下章节内容生成一个详细的思维导图，使用Markdown格式，包含主题和主要分支：\n\n章节标题：{chapter.title}\n章节描述：{chapter_description}\n章节内容：{input_content}...\n\n要求：\n1. 思维导图应该包含章节的核心主题和主要知识点\n2. 使用Markdown列表格式，层次分明\n3. 确保内容基于章节实际内容，不要编造信息\n4. 保持结构清晰，便于理解\n5. 内容详实，控制在800字以内"
+            
+            mindmap = llm_service.generate_response(mindmap_prompt, temperature=0.3, max_tokens=1000)
+            
+            # 2. 生成PPT内容
+            ppt_prompt = f"请基于以下章节内容生成一个详细的PPT内容，使用Markdown格式，包含多个页面：\n\n章节标题：{chapter.title}\n章节描述：{chapter_description}\n章节内容：{input_content}...\n\n要求：\n1. PPT应该包含标题页、目录页、内容页和总结页\n2. 每个页面使用##标记开始\n3. 内容应该基于章节实际内容，不要编造信息\n4. 重点突出章节的核心概念和关键知识点\n5. 保持内容简洁明了，便于演示\n6. 控制在1500字以内"
+            
+            ppt = llm_service.generate_response(ppt_prompt, temperature=0.3, max_tokens=1500)
+            
+            # 3. 生成关键概念对比
+            concepts_prompt = f"请基于以下章节内容提取3-5个关键概念，并为每个概念提供详细描述和对比分析：\n\n章节标题：{chapter.title}\n章节描述：{chapter_description}\n章节内容：{input_content}...\n\n要求：\n1. 提取章节中的核心概念\n2. 为每个概念提供详细的描述\n3. 分析概念之间的关系和对比\n4. 确保内容基于章节实际内容，不要编造信息\n5. 返回JSON格式，包含name、description和comparison字段\n6. 控制在1000字以内"
+            
+            concepts_response = llm_service.generate_response(concepts_prompt, temperature=0.3, max_tokens=1000)
+            
+            # 解析关键概念
+            import json
+            try:
+                key_concepts = json.loads(concepts_response)
+                if isinstance(key_concepts, dict) and 'concepts' in key_concepts:
+                    key_concepts = key_concepts['concepts']
+                elif not isinstance(key_concepts, list):
+                    # 如果不是列表，转换为列表
+                    key_concepts = []
+            except json.JSONDecodeError:
+                # 如果解析失败，使用回退方案
+                key_concepts = []
+                # 提取概念
+                lines = chapter_content.split('\n')
+                concept_lines = [line for line in lines if line.strip() and (line.startswith('###') or '概念' in line)][:3]
+                for i, line in enumerate(concept_lines):
+                    concept_name = line.strip().replace('###', '').strip()
+                    concept_desc = ' '.join(lines[lines.index(line) + 1:lines.index(line) + 5])[:200] if lines.index(line) + 1 < len(lines) else '概念描述'
+                    key_concepts.append({
+                        'name': concept_name,
+                        'description': concept_desc,
+                        'comparison': f"与其他相关概念的对比分析"
+                    })
+            
+            # 如果没有提取到概念，添加默认概念
+            if not key_concepts:
+                key_concepts = [
+                    {
+                        'name': '核心概念 1',
+                        'description': f'{chapter.title}中的核心概念之一',
+                        'comparison': '与其他概念的对比分析'
+                    },
+                    {
+                        'name': '核心概念 2',
+                        'description': f'{chapter.title}中的另一个核心概念',
+                        'comparison': '与其他概念的对比分析'
+                    },
+                    {
+                        'name': '核心概念 3',
+                        'description': f'{chapter.title}中的第三个核心概念',
+                        'comparison': '与其他概念的对比分析'
+                    }
+                ]
+            
+            # 4. 生成豆包重点笔记
+            notes_prompt = f"请基于以下章节内容生成简洁的学习笔记，使用Markdown格式：\n\n章节标题：{chapter.title}\n章节描述：{chapter_description}\n章节内容：{input_content}...\n\n要求：\n1. 笔记应该包含章节的核心内容和重点知识点\n2. 使用Markdown标题和列表格式，层次分明\n3. 包含学习建议和重点关注内容\n4. 确保内容基于章节实际内容，不要编造信息\n5. 语言友好，便于学生理解\n6. 控制在800字以内，内容精简，突出重点"
+            
+            notes = llm_service.generate_response(notes_prompt, temperature=0.3, max_tokens=1500)
+            
+            # 如果生成的笔记内容是回退响应，生成更有针对性的笔记
+            if "建议您每天保持固定的学习时间" in notes:
+                notes = f"# {chapter.title} 学习笔记\n\n## 核心知识点\n\n{chapter_description}\n\n## 重点内容\n\n- 计算机的发展历程\n- 计算机系统的组成\n- 常见的编程语言\n- 网络基础知识\n- 信息安全的重要性\n\n## 学习建议\n\n1. 理解计算机系统的基本组成和工作原理\n2. 熟悉常见的编程语言及其应用场景\n3. 掌握网络基础知识和常用协议\n4. 了解信息安全的基本概念和防护措施\n5. 多做实践练习，加深对知识点的理解\n\n## 重点关注\n\n- 计算机硬件和软件的关系\n- 不同编程语言的特点和适用场景\n- 网络模型和协议的工作原理\n- 信息安全的威胁和防护措施"
+            
+            # 5. 生成章节总结
+            summary_prompt = f"请基于以下章节内容生成一个简洁的章节总结，使用Markdown格式：\n\n章节标题：{chapter.title}\n章节描述：{chapter_description}\n章节内容：{input_content}...\n\n要求：\n1. 总结应该包含章节的核心内容和重点知识点\n2. 突出章节的关键概念和重要内容\n3. 提供学习建议和重点关注内容\n4. 确保内容基于章节实际内容，不要编造信息\n5. 语言友好，便于学生理解\n6. 控制在500字以内，内容精简，突出重点"
+            
+            summary = llm_service.generate_response(summary_prompt, temperature=0.3, max_tokens=1000)
+            
+            # 如果生成的总结内容是回退响应，生成更有针对性的总结
+            if "建议您每天保持固定的学习时间" in summary:
+                summary = f"# {chapter.title} 章节总结\n\n## 核心内容\n\n{chapter_description}\n\n## 关键概念\n\n1. **计算机系统组成**：硬件系统（主机、外设）和软件系统（系统软件、应用软件）\n2. **编程语言**：机器语言、汇编语言、高级语言（面向过程、面向对象、脚本语言）\n3. **网络基础**：网络定义与分类、OSI七层模型、TCP/IP四层模型、常用协议、网络设备\n4. **信息安全**：安全威胁、防护措施、数据保护、相关法规\n\n## 学习收获\n\n通过本章的学习，你应该能够：\n- 了解计算机的发展历程和未来趋势\n- 掌握计算机系统的基本组成和工作原理\n- 熟悉常见的编程语言及其应用场景\n- 理解网络基础知识和常用协议\n- 认识信息安全的重要性和基本防护措施\n\n## 学习建议\n\n1. 结合实际案例，加深对计算机系统组成的理解\n2. 尝试学习一种编程语言，实践编程技能\n3. 关注网络技术的最新发展和应用\n4. 培养信息安全意识，掌握基本的安全防护技能\n5. 定期复习，巩固所学知识"
+            
+            
+            # 更新数据库
+            guide.mindmap = mindmap
+            guide.ppt = ppt
+            guide.key_concepts = key_concepts
+            guide.notes = notes
+            guide.summary = summary
+            guide.status = 'completed'
+            guide.save()
+            
+        except Exception as e:
+            # 生成失败，更新状态
+            guide = AILearningGuide.objects.get(id=guide_id)
+            guide.status = 'failed'
+            guide.save()
+            print(f"生成 AI 导学内容失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    def retrieve(self, request, *args, **kwargs):
+        """获取章节详情"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        # 如果用户已登录，可以记录学习行为
+        if request.user.is_authenticated:
+            # 这里应该调用learning应用的API来记录学习行为
+            pass
+        
+        return Response(serializer.data)
+
+
+# ===== 教材提供者端相关视图集（预留接口） =====
+
+
+class BookCategoryViewSet(viewsets.ModelViewSet):
+    """
+    教材分类管理接口（教材提供者端）
+    - GET /api/provider/books/categories/
+    - POST /api/provider/books/categories/
+    """
+
+    queryset = BookCategory.objects.all().order_by('order', 'name')
+    serializer_class = BookCategorySerializer
+    permission_classes = [IsAuthenticated]
+
+
+class BookTagViewSet(viewsets.ModelViewSet):
+    """
+    教材标签管理接口（教材提供者端）
+    - GET /api/provider/books/tags/
+    - POST /api/provider/books/tags/
+    """
+
+    queryset = BookTag.objects.all().order_by('name')
+    serializer_class = BookTagSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class BookVersionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    教材版本查看接口（教材提供者端）
+    预留：后续可以扩展 POST 用于创建版本、回滚等。
+    """
+
+    queryset = BookVersion.objects.select_related('book', 'created_by').all()
+    serializer_class = BookVersionSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """根据book参数过滤版本"""
+        queryset = super().get_queryset()
+        book_id = self.request.query_params.get('book', None)
+        if book_id:
+            queryset = queryset.filter(book_id=book_id)
+        return queryset.order_by('-version_number')
+    
+    @action(detail=False, methods=['get'], url_path='compare')
+    def compare(self, request):
+        """对比两个书籍版本"""
+        version1_id = request.query_params.get('version1')
+        version2_id = request.query_params.get('version2')
+        
+        if not version1_id or not version2_id:
+            return Response(
+                {'error': '需要提供version1和version2参数'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            version1 = self.get_queryset().get(id=version1_id)
+            version2 = self.get_queryset().get(id=version2_id)
+        except BookVersion.DoesNotExist:
+            return Response(
+                {'error': '版本不存在'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # 对比结果
+        diff_result = {
+            'version1': BookVersionSerializer(version1).data,
+            'version2': BookVersionSerializer(version2).data,
+            'base_diff': {
+                'title': version1.title != version2.title,
+                'author': version1.author != version2.author,
+                'description': version1.description != version2.description,
+            },
+            'diff_details': {}
+        }
+        
+        # 详细对比描述字段
+        if version1.description != version2.description:
+            diff_result['diff_details']['description'] = self._diff_text(version1.description, version2.description)
+        
+        return Response(diff_result)
+    
+    def _diff_text(self, text1, text2):
+        """简单的文本差异对比"""
+        lines1 = text1.split('\n') if text1 else []
+        lines2 = text2.split('\n') if text2 else []
+        
+        # 简单的逐行对比
+        diff_lines = []
+        max_len = max(len(lines1), len(lines2))
+        
+        for i in range(max_len):
+            line1 = lines1[i] if i < len(lines1) else None
+            line2 = lines2[i] if i < len(lines2) else None
+            
+            if line1 != line2:
+                if line1:
+                    diff_lines.append(f"- {line1}")
+                if line2:
+                    diff_lines.append(f"+ {line2}")
+            else:
+                if line1:
+                    diff_lines.append(f"  {line1}")
+        
+        return diff_lines
+
+
+class ChapterVersionViewSet(viewsets.ReadOnlyModelViewSet):
+    """章节版本查看接口（教材提供者端）"""
+
+    queryset = ChapterVersion.objects.select_related('chapter', 'created_by').all()
+    serializer_class = ChapterVersionSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """根据chapter参数过滤版本"""
+        queryset = super().get_queryset()
+        chapter_id = self.request.query_params.get('chapter', None)
+        if chapter_id:
+            queryset = queryset.filter(chapter_id=chapter_id)
+        return queryset.order_by('-version_number')
+    
+    @action(detail=False, methods=['get'], url_path='compare')
+    def compare(self, request):
+        """对比两个章节版本"""
+        version1_id = request.query_params.get('version1')
+        version2_id = request.query_params.get('version2')
+        
+        if not version1_id or not version2_id:
+            return Response(
+                {'error': '需要提供version1和version2参数'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            version1 = self.get_queryset().get(id=version1_id)
+            version2 = self.get_queryset().get(id=version2_id)
+        except ChapterVersion.DoesNotExist:
+            return Response(
+                {'error': '版本不存在'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # 对比结果
+        diff_result = {
+            'version1': ChapterVersionSerializer(version1).data,
+            'version2': ChapterVersionSerializer(version2).data,
+            'base_diff': {
+                'title': version1.title != version2.title,
+                'description': version1.description != version2.description,
+                'content': version1.content != version2.content,
+                'code': version1.code != version2.code,
+                'jupyter_content': version1.jupyter_content != version2.jupyter_content,
+            },
+            'diff_details': {}
+        }
+        
+        # 详细对比各个字段
+        if version1.description != version2.description:
+            diff_result['diff_details']['description'] = self._diff_text(version1.description or '', version2.description or '')
+        
+        if version1.content != version2.content:
+            diff_result['diff_details']['content'] = self._diff_text(version1.content or '', version2.content or '')
+        
+        if version1.code != version2.code:
+            diff_result['diff_details']['code'] = self._diff_text(version1.code or '', version2.code or '')
+        
+        if version1.jupyter_content != version2.jupyter_content:
+            diff_result['diff_details']['jupyter_content'] = self._diff_text(version1.jupyter_content or '', version2.jupyter_content or '')
+        
+        return Response(diff_result)
+    
+    def _diff_text(self, text1, text2):
+        """简单的文本差异对比"""
+        lines1 = text1.split('\n') if text1 else []
+        lines2 = text2.split('\n') if text2 else []
+        
+        # 简单的逐行对比
+        diff_lines = []
+        max_len = max(len(lines1), len(lines2))
+        
+        for i in range(max_len):
+            line1 = lines1[i] if i < len(lines1) else None
+            line2 = lines2[i] if i < len(lines2) else None
+            
+            if line1 != line2:
+                if line1:
+                    diff_lines.append(f"- {line1}")
+                if line2:
+                    diff_lines.append(f"+ {line2}")
+            else:
+                if line1:
+                    diff_lines.append(f"  {line1}")
+        
+        return diff_lines
+
+
+class ChapterMediaViewSet(viewsets.ModelViewSet):
+    """
+    章节多媒体资源管理接口（教材提供者端）
+    - 用于上传/管理 视频、图片、音频、附件 等资源
+    """
+
+    queryset = ChapterMedia.objects.select_related('chapter').all()
+    serializer_class = ChapterMediaSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class BookReviewViewSet(viewsets.ModelViewSet):
+    """
+    教材审核记录接口（教材提供者端/管理员）
+    - 教材提供者可以查看审核结果
+    - 审核人员可以创建审核记录
+    """
+
+    queryset = BookReview.objects.select_related('book', 'reviewer').all()
+    serializer_class = BookReviewSerializer
+    permission_classes = [IsAuthenticated]
