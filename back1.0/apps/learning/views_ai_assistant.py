@@ -130,14 +130,14 @@ class AIAssistantView(views.APIView):
                 if request.user.is_authenticated and request.user.role == 'teacher':
                     # 权限控制：确保教师只能访问自己负责的学生
                     try:
-                        # 假设存在班级与教师的关联关系，以及学生与班级的关联关系
-                        from apps.accounts.models import Class, Student
+                        # 从正确的模块导入模型
+                        from apps.teacher.models import Class, Student
                         
                         # 检查学生是否属于教师负责的班级
                         student = Student.objects.filter(id=student_id).first()
                         if student:
-                            teacher_classes = Class.objects.filter(teacher=request.user)
-                            if student.class_id in [c.id for c in teacher_classes]:
+                            teacher_classes = Class.objects.filter(teacher=request.user.teacher_profile)
+                            if student.class_obj and student.class_obj.id in [c.id for c in teacher_classes]:
                                 # 获取学生相关数据
                                 student_data = self._get_student_data(student_id)
                                 context_used['has_student_context'] = True
@@ -149,10 +149,10 @@ class AIAssistantView(views.APIView):
                 if request.user.is_authenticated and request.user.role == 'teacher':
                     # 权限控制：确保教师只能访问自己负责的班级
                     try:
-                        from apps.accounts.models import Class
+                        from apps.teacher.models import Class
                         
                         # 检查班级是否属于当前教师
-                        if Class.objects.filter(id=class_id, teacher=request.user).exists():
+                        if Class.objects.filter(id=class_id, teacher=request.user.teacher_profile).exists():
                             # 获取班级相关数据
                             class_data = self._get_class_data(class_id)
                             context_used['has_class_context'] = True
@@ -200,7 +200,7 @@ class AIAssistantView(views.APIView):
         获取学生相关数据作为AI上下文
         """
         try:
-            from apps.accounts.models import Student
+            from apps.teacher.models import Student
             from .models import LearningRecord, PracticeRecord, KnowledgeMastery
             
             # 获取学生基本信息
@@ -211,7 +211,7 @@ class AIAssistantView(views.APIView):
             student_data = {
                 'name': student.student_name,
                 'student_no': student.student_no,
-                'class_id': student.class_id
+                'class_id': student.class_obj.id if student.class_obj else None
             }
             
             # 获取学习记录
@@ -259,7 +259,7 @@ class AIAssistantView(views.APIView):
         获取班级相关数据作为AI上下文
         """
         try:
-            from apps.accounts.models import Class, Student
+            from apps.teacher.models import Class, Student
             from .models import LearningRecord, PracticeRecord
             
             # 获取班级基本信息
@@ -269,11 +269,11 @@ class AIAssistantView(views.APIView):
             
             class_data = {
                 'name': class_obj.name,
-                'student_count': class_obj.student_set.count()
+                'student_count': class_obj.students.count()
             }
             
             # 获取班级学生列表
-            students = Student.objects.filter(class_id=class_id)
+            students = Student.objects.filter(class_obj_id=class_id)
             class_data['students'] = [{
                 'id': student.id,
                 'name': student.student_name,

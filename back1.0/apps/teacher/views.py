@@ -1506,16 +1506,34 @@ class StudentSideViewSet(viewsets.ViewSet):
             
             # 获取学生所在的所有班级
             student_classes = StudentClass.objects.filter(student=student, is_active=True)
+            
             if student_classes.exists():
-                # 获取所有班级的班级ID
-                class_ids = [sc.class_obj.id for sc in student_classes]
+                # 获取所有有效的班级ID
+                class_ids = []
+                for sc in student_classes:
+                    try:
+                        if sc.class_obj:
+                            # 尝试访问班级对象，确保它存在
+                            _ = sc.class_obj.id
+                            class_ids.append(sc.class_obj.id)
+                    except Exception:
+                        # 跳过无效的班级关系
+                        pass
+                
                 # 获取所有班级的已发布作业
-                homeworks = Homework.objects.filter(class_obj__in=class_ids, status=2)
+                if class_ids:
+                    homeworks = Homework.objects.filter(class_obj__in=class_ids, status=2)
+                else:
+                    # 如果没有有效的班级ID，返回空列表
+                    homeworks = Homework.objects.none()
+                
                 serializer = HomeworkSerializer(homeworks, many=True)
                 return Response(serializer.data)
             return Response([], status=status.HTTP_200_OK)
         except AttributeError:
             return Response({'error': '用户不是学生'}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({'error': f'获取作业列表失败: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['get'])
     def list_resources(self, request):
@@ -1530,18 +1548,31 @@ class StudentSideViewSet(viewsets.ViewSet):
             # 获取班级资源
             class_resources = []
             if student_classes.exists():
-                # 获取所有班级的班级ID
-                class_ids = [sc.class_obj.id for sc in student_classes]
+                # 获取所有有效的班级ID
+                class_ids = []
+                for sc in student_classes:
+                    try:
+                        if sc.class_obj:
+                            # 尝试访问班级对象，确保它存在
+                            _ = sc.class_obj.id
+                            class_ids.append(sc.class_obj.id)
+                    except Exception:
+                        # 跳过无效的班级关系
+                        pass
                 
                 # 检查是否有课程筛选条件
                 class_filter = request.query_params.get('class_id')
                 if class_filter:
-                    # 如果提供了课程ID，且该课程在学生所在班级列表中
-                    if int(class_filter) in class_ids:
-                        class_resources = ClassResource.objects.filter(class_obj_id=class_filter)
+                    try:
+                        # 如果提供了课程ID，且该课程在学生所在班级列表中
+                        if int(class_filter) in class_ids:
+                            class_resources = ClassResource.objects.filter(class_obj_id=class_filter)
+                    except (ValueError, TypeError):
+                        pass
                 else:
                     # 获取所有班级的资源
-                    class_resources = ClassResource.objects.filter(class_obj__in=class_ids)
+                    if class_ids:
+                        class_resources = ClassResource.objects.filter(class_obj__in=class_ids)
             
             # 获取公开的教学资源
             teaching_resources = TeachingResource.objects.filter(is_public=True)
@@ -1557,27 +1588,27 @@ class StudentSideViewSet(viewsets.ViewSet):
             # 转换教学资源字段为班级资源格式
             for resource in teaching_resources_data:
                 # 将教学资源转换为班级资源格式
-                resource['resource_name'] = resource['title']
-                resource['resource_desc'] = resource['description']
-                resource['resource_url'] = resource['file']
-                resource['upload_time'] = resource['created_at']
+                resource['resource_name'] = resource.get('title', '')
+                resource['resource_desc'] = resource.get('description', '')
+                resource['resource_url'] = resource.get('file', '')
+                resource['upload_time'] = resource.get('created_at')
                 
                 # 移除不兼容的字段
-                del resource['title']
-                del resource['description']
-                del resource['file']
-                del resource['created_at']
-                del resource['updated_at']
-                del resource['category']
-                del resource['is_public']
+                for key in ['title', 'description', 'file', 'created_at', 'updated_at', 'category', 'is_public']:
+                    if key in resource:
+                        del resource[key]
             
             # 合并所有资源并按上传时间排序
             all_resources = class_resources_data + teaching_resources_data
-            all_resources.sort(key=lambda x: x['upload_time'], reverse=True)
+            # 过滤掉upload_time为None的资源，然后排序
+            valid_resources = [r for r in all_resources if r.get('upload_time')]
+            valid_resources.sort(key=lambda x: x['upload_time'], reverse=True)
             
-            return Response(all_resources)
+            return Response(valid_resources)
         except AttributeError:
             return Response({'error': '用户不是学生'}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({'error': f'获取学习资源失败: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['get'])
     def list_notices(self, request):
@@ -1589,15 +1620,30 @@ class StudentSideViewSet(viewsets.ViewSet):
             # 获取学生所在的所有班级
             student_classes = StudentClass.objects.filter(student=student, is_active=True)
             if student_classes.exists():
-                # 获取所有班级的班级ID
-                class_ids = [sc.class_obj.id for sc in student_classes]
+                # 获取所有有效的班级ID
+                class_ids = []
+                for sc in student_classes:
+                    try:
+                        if sc.class_obj:
+                            # 尝试访问班级对象，确保它存在
+                            _ = sc.class_obj.id
+                            class_ids.append(sc.class_obj.id)
+                    except Exception:
+                        # 跳过无效的班级关系
+                        pass
                 # 获取所有班级的通知和全局通知
-                notices = Notice.objects.filter(Q(class_obj__in=class_ids) | Q(class_obj__isnull=True), status=1)
+                if class_ids:
+                    notices = Notice.objects.filter(Q(class_obj__in=class_ids) | Q(class_obj__isnull=True), status=1)
+                else:
+                    # 如果没有有效的班级ID，只获取全局通知
+                    notices = Notice.objects.filter(class_obj__isnull=True, status=1)
                 serializer = NoticeSerializer(notices, many=True)
                 return Response(serializer.data)
             return Response([], status=status.HTTP_200_OK)
         except AttributeError:
             return Response({'error': '用户不是学生'}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({'error': f'获取通知消息失败: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=True, methods=['get'])
     def get_homework_detail(self, request, pk=None):

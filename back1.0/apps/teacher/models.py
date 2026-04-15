@@ -372,7 +372,7 @@ class TeachingResource(models.Model):
     download_count = models.IntegerField(default=0, verbose_name='下载次数', db_column='download_count')
 
     class Meta:
-        db_table = 'teachingresource'
+        db_table = 'teaching_resource'
         verbose_name = '教学资源'
         verbose_name_plural = '教学资源'
         ordering = ['-created_at']

@@ -181,19 +181,28 @@ export default {
         const dueDate = new Date(formData.value.due_date)
         const formattedDueDate = dueDate.toISOString()
 
-        // 注意：后端目前只支持创建单个班级的作业，所以只使用第一个选中的班级
-        const selectedClassId = formData.value.classes[0]
+        // 验证表单数据
+        if (!formData.value.title) {
+          alert('请输入作业名称')
+          return
+        }
         
-
-        // 验证班级是否被正确选择
-        if (!selectedClassId) {
+        if (!formData.value.description) {
+          alert('请输入作业内容')
+          return
+        }
+        
+        if (!formData.value.classes || formData.value.classes.length === 0) {
           alert('请选择一个班级')
           return
         }
         
+        // 注意：后端目前只支持创建单个班级的作业，所以只使用第一个选中的班级
+        const selectedClassId = formData.value.classes[0]
+        
         const data = {
           homework_name: formData.value.title,
-          homework_content: formData.value.description || '',
+          homework_content: formData.value.description,
           total_score: formData.value.total_score || 100,
           start_time: new Date().toISOString(),  // 当前时间作为开始时间
           end_time: formattedDueDate,
