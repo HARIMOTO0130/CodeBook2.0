@@ -9,9 +9,4 @@ class Migration(migrations.Migration):
         ('teacher', '0005_studenthomeworkfile_and_more'),
     ]
 
-    operations = [
-        migrations.AlterModelTable(
-            name='teachingresource',
-            table='teaching_resource',
-        ),
-    ]
+    operations = []

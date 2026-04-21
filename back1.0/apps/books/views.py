@@ -48,7 +48,7 @@ from .serializers import (
     BookReviewSerializer,
 )
 from apps.learning.models import LearningRecord
-from .advanced_processor import AdvancedPDFProcessor
+# from .advanced_processor import AdvancedPDFProcessor
 
 
 class BookViewSet(viewsets.ModelViewSet):
@@ -59,7 +59,7 @@ class BookViewSet(viewsets.ModelViewSet):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # 初始化高级PDF处理器
-        self.advanced_processor = AdvancedPDFProcessor()
+        # self.advanced_processor = AdvancedPDFProcessor()
     
     def get_permissions(self):
         # GET操作不需要认证，其他操作（包括DELETE）需要认证

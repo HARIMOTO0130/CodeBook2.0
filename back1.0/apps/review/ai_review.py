@@ -221,14 +221,20 @@ def run_ai_review(task, book_data, chapters_data):
     """
     from .models import AIReviewRecord, WorkflowLog
     
-    ai_record, created = AIReviewRecord.objects.get_or_create(
-        task=task,
-        defaults={'status': 'pending'}
-    )
+    try:
+        # 尝试获取已存在的AI审核记录
+        ai_record = AIReviewRecord.objects.get(task=task)
+        # 如果已完成，直接返回
+        if ai_record.status == 'completed':
+            return ai_record
+    except AIReviewRecord.DoesNotExist:
+        # 如果不存在，创建新记录
+        ai_record = AIReviewRecord.objects.create(
+            task=task,
+            status='pending'
+        )
     
-    if ai_record.status == 'completed':
-        return ai_record
-    
+    # 更新状态为处理中
     ai_record.status = 'processing'
     ai_record.save()
     

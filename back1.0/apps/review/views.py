@@ -154,13 +154,32 @@ class ReviewTaskViewSet(viewsets.ModelViewSet):
         task = self.get_object()
         
         try:
-            book_data = {
-                'title': task.book_title,
-                'author': task.book_author,
-                'description': task.description or '',
-            }
-            
-            chapters_data = []
+            # 获取关联的Book对象
+            try:
+                book = Book.objects.get(id=task.book_id)
+                book_data = {
+                    'title': book.title,
+                    'author': book.author,
+                    'description': book.description or '',
+                }
+                
+                # 获取书籍的章节数据
+                chapters_data = []
+                chapters = book.chapters.filter(type__in=['reading', 'video']).order_by('order')
+                for chapter in chapters:
+                    chapters_data.append({
+                        'title': chapter.title,
+                        'content': chapter.content or '',
+                        'code': chapter.code or '',
+                    })
+            except Book.DoesNotExist:
+                # 如果Book不存在，使用任务中的数据
+                book_data = {
+                    'title': task.book_title,
+                    'author': task.book_author,
+                    'description': task.description or '',
+                }
+                chapters_data = []
             
             ai_record = run_ai_review(task, book_data, chapters_data)
             
@@ -214,7 +233,9 @@ class ManualReviewViewSet(viewsets.ModelViewSet):
         except ReviewTask.DoesNotExist:
             return Response({'error': '任务不存在'}, status=status.HTTP_404_NOT_FOUND)
         
-        if task.assigned_reviewer != request.user:
+        # 检查用户是否是任务的分配审核员，或者是管理员
+        from apps.users.models import User
+        if task.assigned_reviewer != request.user and not request.user.is_staff:
             return Response({'error': '您没有权限审核此任务'}, status=status.HTTP_403_FORBIDDEN)
         
         existing_record = ManualReviewRecord.objects.filter(

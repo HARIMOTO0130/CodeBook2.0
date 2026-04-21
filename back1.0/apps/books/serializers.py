@@ -171,6 +171,7 @@ class BookDetailSerializer(serializers.ModelSerializer):
             'current_version',
             'isbn',
             'language',
+            'status',
         )
 
     def get_owner(self, obj):

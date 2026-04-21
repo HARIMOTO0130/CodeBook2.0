@@ -201,8 +201,43 @@ class Book(models.Model):
             # 新建记录时，章节数默认为0
             self.chapter_count = 0
 
+        # 检查状态变化，当状态变为pending_review时创建审核任务
+        old_status = None
+        if self.pk:
+            old_instance = Book.objects.get(pk=self.pk)
+            old_status = old_instance.status
+
         # 保存实例
         super().save(*args, **kwargs)
+
+        # 如果状态变为pending_review，创建审核任务
+        if self.status == 'pending_review' and (old_status is None or old_status != 'pending_review'):
+            try:
+                from apps.review.models import ReviewTask
+                # 创建审核任务
+                ReviewTask.objects.create(
+                    book_id=self.id,
+                    book_title=self.title,
+                    book_subtitle=self.subtitle,
+                    book_author=self.author,
+                    book_isbn=self.isbn,
+                    book_language=self.language or 'zh-CN',
+                    book_word_count=self.word_count,
+                    task_type='new_submission',
+                    status='pending',
+                    priority=0,
+                    submitted_by_id=self.owner.id if self.owner else None,
+                    submitted_by_name=self.owner.username if self.owner else None,
+                    submitted_by_username=self.owner.username if self.owner else None,
+                    description=self.description,
+                    chapter_count=self.chapter_count,
+                    version_number=self.current_version,
+                    submitted_at=self.created_at,
+                    original_uploaded_at=self.created_at,
+                    deadline=None
+                )
+            except Exception as e:
+                logger.error(f'创建审核任务失败: {str(e)}')
 
 
 class BookVersion(models.Model):

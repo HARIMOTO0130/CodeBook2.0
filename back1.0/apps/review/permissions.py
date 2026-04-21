@@ -148,6 +148,14 @@ class ReviewTaskAccessControl(permissions.BasePermission):
             if view.action == 'claim' and obj.status == 'pending':
                 return True
             
+            # 释放任务权限：只能释放自己的任务
+            if view.action == 'release' and obj.assigned_reviewer == request.user:
+                return True
+            
+            # AI审核权限：所有审核员都可以触发
+            if view.action == 'trigger_ai_review':
+                return True
+            
             return False
         
         return request.user.is_staff

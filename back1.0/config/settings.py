@@ -80,9 +80,9 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.getenv('DB_NAME', 'codebook'),
-        'USER': os.getenv('DB_USER', 'admin'),
-        'PASSWORD': os.getenv('DB_PASSWORD', 'Admin@123456'),
+        'NAME': os.getenv('DB_NAME', 'codebook_pro'),
+        'USER': os.getenv('DB_USER', 'root'),
+        'PASSWORD': os.getenv('DB_PASSWORD', 'Lfy050708'),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '3306'),
         'OPTIONS': {
@@ -93,9 +93,9 @@ DATABASES = {
 }
 
 # 豆包大模型API配置 (Doubao/火山引擎)
-DOUBao_API_KEY = os.getenv('DOUBao_API_KEY', '9511e57c-7838-415d-8225-fdf89678c631')
-DOUBao_API_BASE_URL = os.getenv('DOUBao_API_BASE_URL', 'https://ark.cn-beijing.volces.com/api/v3')
-DOUBao_MODEL_ID = os.getenv('DOUBao_MODEL_ID', 'doubao-seed-1-6-251015')
+DOUBAO_API_KEY = os.getenv('DOUBAO_API_KEY', '9511e57c-7838-415d-8225-fdf89678c631')
+DOUBAO_API_BASE_URL = os.getenv('DOUBAO_API_BASE_URL', 'https://ark.cn-beijing.volces.com/api/v3')
+DOUBAO_MODEL_ID = os.getenv('DOUBAO_MODEL_ID', 'doubao-seed-1-6-251015')
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
