@@ -164,6 +164,8 @@
               {{ currentBook.permission_status === 'locked' ? '🔓 解锁' : '🔒 加锁' }}
             </button>
             <button class="btn btn-secondary" @click="openPermissionRequests(currentBook)">📋 权限申请</button>
+            <button class="btn btn-secondary" @click="openUserPermissions(currentBook)">👥 用户权限</button>
+            <button class="btn btn-secondary" @click="viewLockLogs(currentBook)">📜 加锁日志</button>
             <button class="btn btn-danger" @click="openDeleteDialog">删除教材</button>
           </div>
         </div>
@@ -315,8 +317,8 @@
             <div v-if="permissionRequestsLoading" class="empty-tip">正在加载权限申请...</div>
             <div v-else-if="permissionRequests.length === 0" class="empty-tip">暂无权限申请</div>
             <div v-else class="permission-requests-list">
-              <div 
-                v-for="request in permissionRequests" 
+              <div
+                v-for="request in permissionRequests"
                 :key="request.id"
                 class="permission-request-item"
               >
@@ -347,7 +349,138 @@
           </div>
         </div>
       </div>
+
+      <!-- 加锁弹窗 -->
+      <div v-if="showLockDialog" class="modal-overlay" @click.self="showLockDialog = false">
+        <div class="modal">
+          <div class="modal-header">
+            <h3>教材加锁</h3>
+            <button class="close-btn" @click="showLockDialog = false">×</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-group">
+              <label class="form-label">锁定原因（可选）</label>
+              <textarea v-model="lockForm.reason" class="input" rows="3" placeholder="请输入锁定原因，如：内容更新维护中"></textarea>
+            </div>
+            <div class="form-group">
+              <label class="form-label">锁定期限</label>
+              <select v-model="lockForm.duration" class="input">
+                <option value="1小时">1小时</option>
+                <option value="3小时">3小时</option>
+                <option value="6小时">6小时</option>
+                <option value="12小时">12小时</option>
+                <option value="1天">1天</option>
+                <option value="3天">3天</option>
+                <option value="7天" selected>7天</option>
+                <option value="2周">2周</option>
+                <option value="1个月">1个月</option>
+                <option value="3个月">3个月</option>
+                <option value="永久">永久</option>
+              </select>
+            </div>
+            <div class="lock-tips">
+              <p class="tip-text">💡 提示：加锁后，学生将无法访问该教材，直到您手动解锁或到期自动解锁</p>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn" @click="showLockDialog = false">取消</button>
+            <button class="btn btn-primary" @click="submitLock">确认加锁</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 加锁日志弹窗 -->
+      <div v-if="showLockLogsDialog" class="modal-overlay" @click.self="showLockLogsDialog = false">
+        <div class="modal" style="width: 600px;">
+          <div class="modal-header">
+            <h3>加锁日志</h3>
+            <button class="close-btn" @click="showLockLogsDialog = false">×</button>
+          </div>
+          <div class="modal-body" style="max-height: 400px; overflow-y: auto;">
+            <div v-if="lockLogsLoading" class="empty-tip">正在加载日志...</div>
+            <div v-else-if="lockLogs.length === 0" class="empty-tip">暂无加锁日志</div>
+            <div v-else class="lock-logs-list">
+              <div
+                v-for="log in lockLogs"
+                :key="log.id"
+                class="lock-log-item"
+              >
+                <div class="log-header">
+                  <span class="log-action" :class="log.action">{{ getLockActionText(log.action) }}</span>
+                  <span class="log-time">{{ formatTime(log.created_at) }}</span>
+                </div>
+                <div class="log-content">
+                  <p v-if="log.reason"><strong>原因：</strong>{{ log.reason }}</p>
+                  <p v-if="log.duration"><strong>时长：</strong>{{ log.duration }}</p>
+                  <p><strong>操作人：</strong>{{ log.operator_username || '系统' }}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn" @click="showLockLogsDialog = false">关闭</button>
+          </div>
+        </div>
     </div>
+  </div>
+
+  <!-- 用户权限管理弹窗 -->
+  <div v-if="showUserPermissions" class="modal-overlay" @click.self="showUserPermissions = false">
+    <div class="modal" style="width: 800px; max-width: 90vw;">
+      <div class="modal-header">
+        <h3>用户权限管理 - {{ currentPermissionBook?.title }}</h3>
+        <button class="close-btn" @click="showUserPermissions = false">×</button>
+      </div>
+      <div class="modal-body">
+        <div v-if="userPermissionsLoading" class="loading">
+          <div class="spinner"></div>
+          <p>加载中...</p>
+        </div>
+        <div v-else-if="userPermissions.length === 0" class="empty-state">
+          <p>暂无用户权限记录</p>
+        </div>
+        <div v-else class="user-permissions-list">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>权限状态</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="permission in userPermissions" :key="permission.id">
+                <td>{{ permission.user_name || '未知用户' }}</td>
+                <td>
+                  <span :class="{
+                    'status-badge': true,
+                    'status-open': permission.status === 'open',
+                    'status-locked': permission.status === 'locked'
+                  }">
+                    {{ getPermissionStatusText(permission.status) }}
+                  </span>
+                </td>
+                <td>{{ formatTime(permission.created_at) }}</td>
+                <td>
+                  <button 
+                    class="btn btn-sm" 
+                    :class="permission.status === 'open' ? 'btn-danger' : 'btn-success'"
+                    @click="toggleUserPermission(permission)"
+                  >
+                    {{ permission.status === 'open' ? '🔒 加锁' : '🔓 解锁' }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-default" @click="showUserPermissions = false">关闭</button>
+      </div>
+    </div>
+  </div>
   </ProviderLayout>
 </template>
 
@@ -411,6 +544,11 @@ const uploadForm = ref({
 const showPermissionRequests = ref(false)
 const permissionRequests = ref([])
 const permissionRequestsLoading = ref(false)
+
+// 用户权限管理相关状态
+const showUserPermissions = ref(false)
+const userPermissions = ref([])
+const userPermissionsLoading = ref(false)
 const currentPermissionBook = ref(null)
 
 const resetSearch = () => {
@@ -840,17 +978,94 @@ const getPermissionStatusText = (status) => {
   return statusMap[status] || status
 }
 
-// 切换书籍锁定状态
-const toggleBookLock = async (book) => {
+// 加锁相关状态
+const showLockDialog = ref(false)
+const lockForm = ref({
+  reason: '',
+  duration: ''
+})
+const lockLogs = ref([])
+const showLockLogsDialog = ref(false)
+const lockLogsLoading = ref(false)
+
+// 打开加锁弹窗
+const openLockDialog = async (book) => {
   if (!book || !book.id) return
+  currentBook.value = book
+  lockForm.value = {
+    reason: '',
+    duration: '7天'
+  }
+  showLockDialog.value = true
+}
+
+// 执行加锁
+const submitLock = async () => {
+  if (!currentBook.value || !currentBook.value.id) return
   try {
-    const newStatus = book.permission_status === 'locked' ? 'open' : 'locked'
-    await providerApi.updateBookPermission(book.id, { status: newStatus })
-    // 重新加载书籍列表
+    await providerApi.lockBook(currentBook.value.id, {
+      reason: lockForm.value.reason,
+      duration: lockForm.value.duration
+    })
+    showLockDialog.value = false
     await loadBooks()
   } catch (e) {
-    console.error('切换书籍锁定状态失败', e)
+    console.error('加锁失败', e)
+    alert('加锁失败: ' + (e.message || '未知错误'))
   }
+}
+
+// 执行解锁
+const submitUnlock = async () => {
+  if (!currentBook.value || !currentBook.value.id) return
+  try {
+    await providerApi.unlockBook(currentBook.value.id, {
+      unlock_reason: '手动解锁'
+    })
+    await loadBooks()
+  } catch (e) {
+    console.error('解锁失败', e)
+    alert('解锁失败: ' + (e.message || '未知错误'))
+  }
+}
+
+// 切换书籍锁定状态（使用新的加锁/解锁API）
+const toggleBookLock = async (book) => {
+  if (!book || !book.id) return
+  if (book.permission_status === 'locked') {
+    currentBook.value = book
+    await submitUnlock()
+  } else {
+    await openLockDialog(book)
+  }
+}
+
+// 查看加锁日志
+const viewLockLogs = async (book) => {
+  if (!book || !book.id) return
+  currentBook.value = book
+  lockLogsLoading.value = true
+  showLockLogsDialog.value = true
+  try {
+    lockLogs.value = await providerApi.getBookLockLogs(book.id)
+  } catch (e) {
+    console.error('加载加锁日志失败', e)
+    lockLogs.value = []
+  } finally {
+    lockLogsLoading.value = false
+  }
+}
+
+// 格式化加锁日志操作类型
+const getLockActionText = (action) => {
+  const actionMap = {
+    lock: '加锁',
+    unlock: '解锁',
+    request_unlock: '申请解锁',
+    approve_unlock: '批准解锁',
+    reject_unlock: '拒绝解锁'
+  }
+  return actionMap[action] || action
 }
 
 // 打开权限申请列表
@@ -866,6 +1081,34 @@ const openPermissionRequests = async (book) => {
     console.error('加载权限申请失败', e)
   } finally {
     permissionRequestsLoading.value = false
+  }
+}
+
+// 打开用户权限管理弹窗
+const openUserPermissions = async (book) => {
+  if (!book || !book.id) return
+  currentPermissionBook.value = book
+  userPermissionsLoading.value = true
+  try {
+    const permissions = await providerApi.listUserPermissions(book.id)
+    userPermissions.value = permissions
+    showUserPermissions.value = true
+  } catch (e) {
+    console.error('加载用户权限失败', e)
+  } finally {
+    userPermissionsLoading.value = false
+  }
+}
+
+// 切换用户权限状态
+const toggleUserPermission = async (permission) => {
+  try {
+    const newStatus = permission.status === 'open' ? 'locked' : 'open'
+    await providerApi.updateUserPermission(permission.id, { status: newStatus })
+    // 更新本地状态
+    permission.status = newStatus
+  } catch (e) {
+    console.error('更新用户权限失败', e)
   }
 }
 
@@ -1185,6 +1428,94 @@ onMounted(() => {
   color: #666;
 }
 
+/* 用户权限管理样式 */
+.user-permissions-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+}
+
+.table th,
+.table td {
+  padding: 10px;
+  text-align: left;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.table th {
+  background-color: #f9fafc;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.table tr:hover {
+  background-color: #f9fafc;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-open {
+  background-color: #e8f5e9;
+  color: #2e7d32;
+}
+
+.status-locked {
+  background-color: #ffebee;
+  color: #c62828;
+}
+
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-sm:hover {
+  opacity: 0.8;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px 0;
+  color: #999;
+}
+
+.loading {
+  text-align: center;
+  padding: 40px 0;
+  color: #666;
+}
+
+.spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #f3f3f3;
+  border-top: 2px solid #409eff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 10px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
 .empty-tip {
   font-size: 13px;
   color: #999;
@@ -1421,11 +1752,87 @@ onMounted(() => {
   .layout {
     grid-template-columns: 1fr;
   }
-  
+
   .pagination-controls {
     flex-wrap: wrap;
     justify-content: center;
   }
+}
+
+/* 加锁相关样式 */
+.lock-tips {
+  margin-top: 12px;
+  padding: 10px;
+  background: #f0f9eb;
+  border-radius: 4px;
+}
+
+.tip-text {
+  margin: 0;
+  font-size: 13px;
+  color: #67c23a;
+}
+
+.lock-logs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.lock-log-item {
+  padding: 12px;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  background: #f9fafc;
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.log-action {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.log-action.lock {
+  background: #fef0f0;
+  color: #f56c6c;
+}
+
+.log-action.unlock,
+.log-action.approve_unlock {
+  background: #f0f9eb;
+  color: #67c23a;
+}
+
+.log-action.request_unlock {
+  background: #ecf5ff;
+  color: #409eff;
+}
+
+.log-action.reject_unlock {
+  background: #fef0f0;
+  color: #f56c6c;
+}
+
+.log-time {
+  font-size: 12px;
+  color: #999;
+}
+
+.log-content {
+  font-size: 13px;
+  color: #666;
+}
+
+.log-content p {
+  margin: 4px 0;
 }
 </style>
 

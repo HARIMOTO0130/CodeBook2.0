@@ -264,7 +264,8 @@ function adaptBookListItem(b) {
     chapterCount: b.chapter_count || b.chapters || 0,
     progress: b.progress ?? 0,
     lastLearnTime: b.last_learn_time || b.updated_at || null,
-    major: b.major || '' // 添加专业字段
+    major: b.major || '', // 添加专业字段
+    permission_status: b.permission_status || 'open' // 添加权限状态字段
   };
 }
 
@@ -1025,6 +1026,26 @@ export const api = {
       throw error;
     }
   },
+
+  // 获取书籍锁定状态信息
+  async getBookLockInfo(bookId) {
+    try {
+      return await httpGet(`/books/${bookId}/lock-info/`, true);
+    } catch (error) {
+      console.error('获取书籍锁定信息失败:', error);
+      throw error;
+    }
+  },
+
+  // 获取我的解锁申请记录
+  async getMyUnlockRequests(bookId) {
+    try {
+      return await httpGet(`/books/${bookId}/my-unlock-requests/`, true);
+    } catch (error) {
+      console.error('获取解锁申请记录失败:', error);
+      throw error;
+    }
+  },
   
   // 笔记相关API
   async getNotes() {
@@ -1521,6 +1542,19 @@ export const api = {
     return await res.json();
   },
   
+  // 章节媒体相关API
+  async getChapterMedia(chapterId, mediaType) {
+    try {
+      console.log(`获取章节媒体内容: chapterId=${chapterId}, mediaType=${mediaType}`);
+      const response = await httpGet(`/books/chapters/${chapterId}/media/?type=${mediaType}`);
+      console.log('章节媒体内容API响应:', response);
+      return response;
+    } catch (error) {
+      console.error('获取章节媒体内容失败:', error);
+      return [];
+    }
+  },
+
   // AI 导学相关API
   async getAILearningGuide(bookId, chapterId) {
     try {

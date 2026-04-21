@@ -32,6 +32,7 @@ from .models import (
     AILearningGuide,
     BookPermission,
     PermissionRequest,
+    BookLockLog,
 )
 from .serializers import (
     BookListSerializer,
@@ -46,6 +47,11 @@ from .serializers import (
     ChapterVersionSerializer,
     ChapterMediaSerializer,
     BookReviewSerializer,
+    BookPermissionSerializer,
+    PermissionRequestSerializer,
+    PermissionRequestCreateSerializer,
+    BookLockLogSerializer,
+    BookLockSerializer,
 )
 from apps.learning.models import LearningRecord
 # from .advanced_processor import AdvancedPDFProcessor
@@ -313,45 +319,207 @@ class BookViewSet(viewsets.ModelViewSet):
                         item['last_learn_time'] = last_time
         
         return Response(serializer.data)
-    
+
+    def _get_client_ip(self, request):
+        """获取客户端IP地址"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(',')[0].strip()
+        else:
+            ip = request.META.get('REMOTE_ADDR')
+        return ip
+
+    def _create_lock_log(self, book, operator, action, reason=None, duration=None, target_user=None, request=None):
+        """创建加锁日志"""
+        log_data = {
+            'book': book,
+            'operator': operator,
+            'action': action,
+            'reason': reason,
+            'duration': duration,
+            'target_user': target_user,
+        }
+        if request:
+            log_data['ip_address'] = self._get_client_ip(request)
+            log_data['user_agent'] = request.META.get('HTTP_USER_AGENT', '')[:500] if request.META.get('HTTP_USER_AGENT') else None
+        BookLockLog.objects.create(**log_data)
+
+    def _can_lock_book(self, user, book):
+        """检查用户是否有权限对书籍进行加锁/解锁操作"""
+        if user.is_admin() or user.is_superuser or user.is_staff:
+            return True
+        if book.owner == user:
+            return True
+        return False
+
+    def _can_manage_unlock_request(self, user, book):
+        """检查用户是否有权限管理解锁申请"""
+        if user.is_admin() or user.is_superuser or user.is_staff:
+            return True
+        if book.owner == user:
+            return True
+        return False
+
+    @action(detail=True, methods=['patch'], url_path='lock')
+    def lock_book(self, request, pk=None):
+        """
+        锁定书籍
+        - 只有书籍所有者或管理员可以执行加锁操作
+        - 支持设置锁定原因和锁定期限
+        """
+        book = self.get_object()
+
+        if not self._can_lock_book(request.user, book):
+            return Response(
+                {'error': '您没有权限锁定这本教材'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = BookLockSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        reason = serializer.validated_data.get('reason', '')
+        duration = serializer.validated_data.get('duration', '')
+
+        lock_expires_at = None
+        if duration:
+            from dateutil.relativedelta import relativedelta
+            from django.utils import timezone
+            now = timezone.now()
+
+            duration_lower = duration.lower()
+            if '小时' in duration_lower or 'hour' in duration_lower:
+                hours = int(''.join(filter(str.isdigit, duration_lower)) or 1)
+                lock_expires_at = now + relativedelta(hours=hours)
+            elif '天' in duration_lower or 'day' in duration_lower:
+                days = int(''.join(filter(str.isdigit, duration_lower)) or 1)
+                lock_expires_at = now + relativedelta(days=days)
+            elif '周' in duration_lower or 'week' in duration_lower:
+                weeks = int(''.join(filter(str.isdigit, duration_lower)) or 1)
+                lock_expires_at = now + relativedelta(weeks=weeks)
+            elif '月' in duration_lower or 'month' in duration_lower:
+                months = int(''.join(filter(str.isdigit, duration_lower)) or 1)
+                lock_expires_at = now + relativedelta(months=months)
+            else:
+                lock_expires_at = now + relativedelta(days=7)
+
+        permission, created = BookPermission.objects.get_or_create(book=book, user=None)
+        permission.status = 'locked'
+        permission.lock_reason = reason
+        permission.lock_expires_at = lock_expires_at
+        permission.locked_by = request.user
+        permission.save()
+
+        self._create_lock_log(
+            book=book,
+            operator=request.user,
+            action='lock',
+            reason=reason,
+            duration=duration,
+            request=request
+        )
+
+        return Response({
+            'status': 'locked',
+            'lock_reason': reason,
+            'lock_expires_at': lock_expires_at,
+            'locked_by': request.user.username
+        })
+
+    @action(detail=True, methods=['patch'], url_path='unlock')
+    def unlock_book(self, request, pk=None):
+        """
+        解锁书籍
+        - 只有书籍所有者或管理员可以执行解锁操作
+        """
+        book = self.get_object()
+
+        if not self._can_lock_book(request.user, book):
+            return Response(
+                {'error': '您没有权限解锁这本教材'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = BookLockSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        unlock_reason = serializer.validated_data.get('unlock_reason', '')
+
+        permission, created = BookPermission.objects.get_or_create(book=book, user=None)
+        permission.status = 'open'
+        permission.lock_reason = ''
+        permission.lock_expires_at = None
+        permission.locked_by = None
+        permission.save()
+
+        self._create_lock_log(
+            book=book,
+            operator=request.user,
+            action='unlock',
+            reason=unlock_reason,
+            request=request
+        )
+
+        return Response({
+            'status': 'open',
+            'message': '教材已解锁'
+        })
+
+    @action(detail=True, methods=['get'], url_path='lock-info')
+    def get_lock_info(self, request, pk=None):
+        """获取书籍的锁定状态信息"""
+        book = self.get_object()
+        permission, created = BookPermission.objects.get_or_create(book=book, user=None)
+
+        return Response({
+            'status': permission.status,
+            'lock_reason': permission.lock_reason,
+            'lock_expires_at': permission.lock_expires_at,
+            'locked_by': permission.locked_by.username if permission.locked_by else None,
+            'is_expired': permission.is_expired,
+            'can_lock': self._can_lock_book(request.user, book),
+            'can_unlock': permission.status == 'locked' and self._can_lock_book(request.user, book)
+        })
+
+    @action(detail=True, methods=['get'], url_path='lock-logs')
+    def get_lock_logs(self, request, pk=None):
+        """获取书籍的加锁日志列表"""
+        book = self.get_object()
+        logs = BookLockLog.objects.filter(book=book).order_by('-created_at')[:50]
+        serializer = BookLockLogSerializer(logs, many=True)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['patch'], url_path='permission')
     def update_book_permission(self, request, pk=None):
         """更新书籍权限状态"""
         book = self.get_object()
         status = request.data.get('status')
-        
+
         if not status:
             return Response({'error': '状态不能为空'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # 更新全局权限状态
+
         permission, created = BookPermission.objects.get_or_create(book=book, user=None)
         permission.status = status
         permission.save()
-        
+
         return Response({'status': permission.status})
-    
+
     @action(detail=True, methods=['get'], url_path='permission-requests')
     def list_permission_requests(self, request, pk=None):
         """获取书籍的权限申请列表"""
         book = self.get_object()
+
+        if not self._can_manage_unlock_request(request.user, book):
+            my_requests = PermissionRequest.objects.filter(book=book, user=request.user).order_by('-created_at')
+            serializer = PermissionRequestSerializer(my_requests, many=True)
+            return Response(serializer.data)
+
         requests = PermissionRequest.objects.filter(book=book).order_by('-created_at')
-        
-        # 序列化权限申请
-        request_data = []
-        for req in requests:
-            request_data.append({
-                'id': req.id,
-                'user': req.user.username,
-                'status': req.status,
-                'reason': req.reason,
-                'created_at': req.created_at,
-                'reviewed_at': req.reviewed_at,
-                'reviewer': req.reviewer.username if req.reviewer else None,
-                'review_comment': req.review_comment
-            })
-        
-        return Response(request_data)
-    
+        serializer = PermissionRequestSerializer(requests, many=True)
+        return Response(serializer.data)
+
     @action(detail=False, methods=['patch'], url_path=r'permission-requests/(?P<request_id>\d+)/review')
     def review_permission_request(self, request, request_id=None):
         """审核权限申请"""
@@ -359,21 +527,36 @@ class BookViewSet(viewsets.ModelViewSet):
             perm_request = PermissionRequest.objects.get(id=request_id)
         except PermissionRequest.DoesNotExist:
             return Response({'error': '申请不存在'}, status=status.HTTP_404_NOT_FOUND)
-        
+
+        if not self._can_manage_unlock_request(request.user, perm_request.book):
+            return Response(
+                {'error': '您没有权限审核此申请'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         status = request.data.get('status')
         comment = request.data.get('comment')
-        
+
         if not status:
             return Response({'error': '状态不能为空'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # 更新申请状态
+
         perm_request.status = status
         perm_request.reviewer = request.user
+        perm_request.reviewed_by = request.user
         perm_request.review_comment = comment
         perm_request.reviewed_at = timezone.now()
         perm_request.save()
-        
-        # 如果同意申请，创建用户权限记录
+
+        action_type = 'approve_unlock' if status == 'approved' else 'reject_unlock'
+        self._create_lock_log(
+            book=perm_request.book,
+            operator=request.user,
+            action=action_type,
+            reason=comment,
+            target_user=perm_request.user,
+            request=request
+        )
+
         if status == 'approved':
             permission, created = BookPermission.objects.get_or_create(
                 book=perm_request.book,
@@ -381,33 +564,106 @@ class BookViewSet(viewsets.ModelViewSet):
             )
             permission.status = 'open'
             permission.save()
-        
+
         return Response({'status': perm_request.status})
-    
+
     @action(detail=True, methods=['post'], url_path='permission-request')
     def create_permission_request(self, request, pk=None):
-        """创建权限申请"""
+        """创建权限申请（学生端解锁申请）"""
         book = self.get_object()
-        reason = request.data.get('reason')
-        
-        # 检查是否已经有未处理的申请
+        serializer = PermissionRequestCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
         existing_request = PermissionRequest.objects.filter(
             book=book,
             user=request.user,
             status='pending'
         ).first()
-        
+
         if existing_request:
             return Response({'error': '您已经提交了申请，等待审核中'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # 创建新的权限申请
+
         perm_request = PermissionRequest.objects.create(
             book=book,
             user=request.user,
-            reason=reason
+            reason=serializer.validated_data.get('reason', ''),
+            expected_duration=serializer.validated_data.get('expected_duration', '')
         )
-        
-        return Response({'id': perm_request.id, 'status': perm_request.status})
+
+        self._create_lock_log(
+            book=book,
+            operator=request.user,
+            action='request_unlock',
+            reason=serializer.validated_data.get('reason', ''),
+            request=request
+        )
+
+        return Response({
+            'id': perm_request.id,
+            'status': perm_request.status,
+            'message': '申请已提交，请等待审核'
+        })
+
+    @action(detail=True, methods=['get'], url_path='my-unlock-requests')
+    def get_my_unlock_requests(self, request, pk=None):
+        """获取当前用户对指定书籍的解锁申请记录"""
+        book = self.get_object()
+        requests = PermissionRequest.objects.filter(
+            book=book,
+            user=request.user
+        ).order_by('-created_at')
+        serializer = PermissionRequestSerializer(requests, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='user-permissions')
+    def list_user_permissions(self, request, pk=None):
+        """获取书籍的用户权限列表"""
+        book = self.get_object()
+
+        if not self._can_manage_unlock_request(request.user, book):
+            return Response(
+                {'error': '您没有权限查看用户权限'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        permissions = BookPermission.objects.filter(book=book, user__isnull=False).order_by('-created_at')
+        serializer = BookPermissionSerializer(permissions, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['patch'], url_path=r'user-permissions/(?P<permission_id>\d+)')
+    def update_user_permission(self, request, permission_id=None):
+        """更新用户教材权限"""
+        try:
+            permission = BookPermission.objects.get(id=permission_id)
+        except BookPermission.DoesNotExist:
+            return Response({'error': '权限记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not self._can_manage_unlock_request(request.user, permission.book):
+            return Response(
+                {'error': '您没有权限管理此教材的用户权限'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        new_status = request.data.get('status')
+        if not new_status:
+            return Response({'error': '状态不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = permission.status
+        permission.status = new_status
+        permission.save()
+
+        action_type = 'unlock' if new_status == 'open' else 'lock'
+        self._create_lock_log(
+            book=permission.book,
+            operator=request.user,
+            action=action_type,
+            reason=f'手动{"解锁" if new_status == "open" else "锁定"}用户权限',
+            target_user=permission.user,
+            request=request
+        )
+
+        return Response({'status': permission.status})
 
     def _extract_pdf_to_images(self, pdf_path):
         """将PDF转换为图像列表"""
@@ -1457,6 +1713,22 @@ class BookViewSet(viewsets.ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         """获取书籍详情，包含所有章节"""
         instance = self.get_object()
+        
+        # 检查书籍权限状态
+        permission, created = BookPermission.objects.get_or_create(book=instance, user=None)
+        
+        # 如果书籍被锁定，检查用户权限
+        if permission.status == 'locked':
+            # 检查用户是否是书籍所有者或管理员
+            if instance.owner != request.user and not (request.user.is_admin() or request.user.is_superuser or request.user.is_staff):
+                # 检查用户是否有单独的权限
+                user_permission = BookPermission.objects.filter(book=instance, user=request.user, status='open').first()
+                if not user_permission:
+                    return Response(
+                        {'error': '此教材已被锁定，需要申请权限才能访问'},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+        
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
 
@@ -1494,17 +1766,108 @@ class ChapterViewSet(viewsets.ModelViewSet):
             return ChapterDetailSerializer
         return ChapterSerializer
     
+    def _check_book_permission(self, request, book):
+        """检查书籍权限"""
+        # 检查书籍权限状态
+        permission, created = BookPermission.objects.get_or_create(book=book, user=None)
+        
+        # 如果书籍被锁定，检查用户权限
+        if permission.status == 'locked':
+            # 检查用户是否是书籍所有者或管理员
+            if book.owner != request.user and not (request.user.is_admin() or request.user.is_superuser or request.user.is_staff):
+                # 检查用户是否有单独的权限
+                user_permission = BookPermission.objects.filter(book=book, user=request.user, status='open').first()
+                if not user_permission:
+                    return False
+        return True
+    
+    def retrieve(self, request, *args, **kwargs):
+        """获取章节详情"""
+        instance = self.get_object()
+        
+        # 检查书籍权限
+        if not self._check_book_permission(request, instance.book):
+            return Response(
+                {'error': '此教材已被锁定，需要申请权限才能访问'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+    
     @action(detail=False, methods=['get'], url_path='book/(?P<book_id>[^/.]+)')
     def by_book(self, request, book_id=None):
         """获取指定书籍的所有章节"""
         try:
+            # 检查书籍权限
+            book = Book.objects.get(id=book_id)
+            if not self._check_book_permission(request, book):
+                return Response(
+                    {'error': '此教材已被锁定，需要申请权限才能访问'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
             # 排除practice类型的章节，只返回阅读和视频类型的章节
             chapters = Chapter.objects.filter(book_id=book_id, type__in=['reading', 'video']).order_by('order')
             serializer = self.get_serializer(chapters, many=True)
             return Response(serializer.data)
+        except Book.DoesNotExist:
+            return Response({'error': '书籍不存在'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
+    @action(detail=True, methods=['get'], url_path='media')
+    def media(self, request, pk=None):
+        """获取章节的媒体内容"""
+        try:
+            chapter = self.get_object()
+            
+            # 检查书籍权限
+            if not self._check_book_permission(request, chapter.book):
+                return Response(
+                    {'error': '此教材已被锁定，需要申请权限才能访问'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            media_type = request.query_params.get('type', None)
+            
+            if media_type:
+                media = chapter.media.filter(media_type=media_type).order_by('order')
+            else:
+                media = chapter.media.order_by('order')
+            
+            # 验证媒体数据
+            from .quality_assurance import QualityAssurance
+            qa = QualityAssurance()
+            qa.validate_chapter_media(chapter.id)
+            
+            # 记录前端访问日志
+            user_id = request.user.id if request.user.is_authenticated else None
+            qa.log_frontend_access(
+                user_id=user_id,
+                book_id=chapter.book.id,
+                chapter_id=chapter.id,
+                action='view_media',
+                status='success'
+            )
+            
+            serializer = ChapterMediaSerializer(media, many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            # 记录失败日志
+            from .quality_assurance import QualityAssurance
+            qa = QualityAssurance()
+            user_id = request.user.id if request.user.is_authenticated else None
+            if 'chapter' in locals():
+                qa.log_frontend_access(
+                    user_id=user_id,
+                    book_id=chapter.book.id if 'chapter' in locals() else None,
+                    chapter_id=chapter.id if 'chapter' in locals() else None,
+                    action='view_media',
+                    status='failure'
+                )
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
     @action(detail=False, methods=['get'], url_path='practices-by-book')
     def practices_by_book(self, request):
         """获取所有书籍的练习题，按书籍分组"""

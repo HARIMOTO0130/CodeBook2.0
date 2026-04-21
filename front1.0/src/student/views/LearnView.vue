@@ -31,17 +31,17 @@
             <video 
               v-else
               ref="videoPlayer" 
-              :src="currentSection?.video_url || currentSection?.videoUrl || 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4'" 
+              :src="getVideoUrl(currentSection?.video_url || currentSection?.videoUrl) || 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4'" 
               controls 
               style="width: 100%; height: auto;"
             >
               您的浏览器不支持HTML5视频播放
             </video>
           <div class="video-controls">
-            <button class="btn">⏮️</button>
-            <button class="btn">⏯️</button>
-            <button class="btn">⏭️</button>
-            <select v-model="videoSpeed" class="speed-select">
+            <button class="btn" @click="rewindVideo">⏮️</button>
+            <button class="btn" @click="togglePlay">⏯️</button>
+            <button class="btn" @click="forwardVideo">⏭️</button>
+            <select v-model="videoSpeed" class="speed-select" @change="changeVideoSpeed">
               <option value="0.75">0.75x</option>
               <option value="1">1x</option>
               <option value="1.25">1.25x</option>
@@ -49,7 +49,7 @@
               <option value="2">2x</option>
             </select>
             <label class="checkbox-label">
-              <input type="checkbox" v-model="showSubtitles"> 字幕
+              <input type="checkbox" v-model="showSubtitles"> 字幕 
             </label>
           </div>
         </div>
@@ -82,7 +82,7 @@
         <div class="section-header">
           <h1>{{ currentSection?.title }}</h1>
           <div class="section-actions">
-            <button v-if="currentSection?.type === 'video' || currentSection?.video_url || currentSection?.hasVideo" class="btn btn-primary" @click="showVideo = true">
+            <button v-if="currentSection?.type === 'video' || currentSection?.video_url || currentSection?.hasVideo || videos.length > 0" class="btn btn-primary" @click="openChapterVideo">
               🎥 视频教学
             </button>
             <button class="btn btn-primary" @click="openAILearningGuide">
@@ -393,12 +393,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { api, API_BASE_URL } from '../api/api.js'
 import JupyterNotebook from '../components/JupyterNotebook.vue'
 import ChapterList from '../components/ChapterList.vue'
+import VideoList from '../components/VideoList.vue'
 
 export default {
   name: 'LearnView',
   components: {
     JupyterNotebook,
-    ChapterList
+    ChapterList,
+    VideoList
   },
   setup() {
     const route = useRoute()
@@ -413,6 +415,8 @@ export default {
     const renderedContent = ref('') // 存储渲染后的HTML内容
     const showVideo = ref(false)
     const showPractice = ref(false)
+    const videos = ref([]) // 存储章节视频列表
+    const videoPlayer = ref(null) // 视频播放器引用
     
     // 练习题相关数据
     const practiceData = ref(null)
@@ -646,6 +650,33 @@ export default {
       }
     }
     
+    // 获取章节视频列表
+    const fetchChapterVideos = async (chapterId) => {
+      try {
+        console.log(`🔄 fetchChapterVideos called for chapter: ${chapterId}`);
+        
+        // 从API获取章节视频数据
+        const videoData = await api.getChapterMedia(chapterId, 'video');
+        console.log('📡 视频API Response received:', { 
+          dataExists: !!videoData,
+          videoCount: videoData?.length || 0
+        });
+        
+        // 更新视频列表
+        videos.value = videoData || [];
+        console.log('🎥 视频列表已更新:', videos.value.length, '个视频');
+        
+        return videos.value;
+      } catch (error) {
+        console.error('❌ 获取章节视频失败:', { 
+          message: error.message,
+          stack: error.stack?.slice(0, 200)
+        });
+        videos.value = [];
+        return [];
+      }
+    }
+    
     // 加载学习内容
     const loadContent = async () => {
       try {
@@ -653,8 +684,13 @@ export default {
         
         // 检查书籍是否被锁定
         if (book.value.permission_status === 'locked') {
-          console.log('🔒 书籍已被锁定，重定向到书籍大纲页面');
-          router.push({ name: 'StudentBookOutline', params: { bookId: bookId.value } });
+          console.log('🔒 书籍已被锁定，显示权限错误信息');
+          // 不重定向，在当前页面显示权限错误信息
+          currentSection.value = null
+          currentChapterContent.value = {
+            description: '此教材已被锁定，需要申请权限才能访问',
+            content: '<div style="text-align: center; padding: 40px; color: #999;"><p>📚 教材已被锁定</p><p>您需要申请权限才能访问此教材</p></div>'
+          }
           return;
         }
         
@@ -664,6 +700,7 @@ export default {
         // 获取章节详细内容
         if (currentSection.value && currentSection.value.id) {
           await fetchChapterContent(currentSection.value.id);
+          await fetchChapterVideos(currentSection.value.id);
           
           // 检查URL查询参数，如果openPractice为true，延迟加载练习题
           // 这样可以确保章节内容已经加载完成，currentSection已经更新
@@ -681,7 +718,23 @@ export default {
         
       } catch (error) {
         console.error('加载内容失败:', error)
-        // 即使加载失败也初始化默认数据，确保页面能正常显示
+        // 如果是权限错误（403），显示权限错误信息
+        if (error.message && error.message.includes('403')) {
+          console.log('🔒 书籍已被锁定，显示权限错误信息');
+          // 不重定向，在当前页面显示权限错误信息
+          book.value = {
+            id: bookId.value,
+            title: '权限受限',
+            permission_status: 'locked'
+          }
+          currentSection.value = null
+          currentChapterContent.value = {
+            description: '此教材已被锁定，需要申请权限才能访问',
+            content: '<div style="text-align: center; padding: 40px; color: #999;"><p>📚 教材已被锁定</p><p>您需要申请权限才能访问此教材</p></div>'
+          }
+          return;
+        }
+        // 其他错误初始化默认数据，确保页面能正常显示
         await initializeDefaultData()
       }
     }
@@ -811,6 +864,26 @@ export default {
       }
     }
     
+    // 打开章节视频教学
+    const openChapterVideo = () => {
+      console.log('🎥 openChapterVideo called', { videos: videos.value });
+      if (videos.value && videos.value.length > 0) {
+        console.log('🎬 Playing first video from list:', videos.value[0]);
+        playVideo(videos.value[0]);
+      } else {
+        console.log('🎬 No videos in list, showing video layer with currentSection video_url:', currentSection.value?.video_url);
+        showVideo.value = true;
+      }
+    }
+    
+    // 播放视频
+    const playVideo = (video) => {
+      console.log('🎬 playVideo called with:', video);
+      currentSection.value.video_url = video.url;
+      console.log('📺 video_url set to:', currentSection.value.video_url);
+      showVideo.value = true;
+    }
+    
     // 监听路由参数变化，重新加载内容
     watch(() => [bookId.value, sectionId.value], ([newBookId, newSectionId], [oldBookId, oldSectionId]) => {
       // 如果只是章节ID变化，且书籍ID相同，可以复用book数据，只加载章节内容
@@ -819,6 +892,7 @@ export default {
         findCurrentSection();
         if (currentSection.value && currentSection.value.id) {
           fetchChapterContent(currentSection.value.id);
+          fetchChapterVideos(currentSection.value.id);
         }
       } else {
         // 书籍ID变化，重新加载所有数据
@@ -1321,10 +1395,72 @@ export default {
       const bvMatch = url.match(/BV[0-9A-Za-z]+/)
       if (bvMatch) {
         const bv = bvMatch[0]
-        // 使用简化版嵌入URL并添加参数以避免指纹识别
-        return `https://player.bilibili.com/player.html?bvid=${bv}&page=1&high_quality=1&danmaku=0&fingerprint=disable`
+        // 使用简化版嵌入URL
+        return `https://player.bilibili.com/player.html?bvid=${bv}&page=1&high_quality=1&danmaku=0`
       }
       return url
+    }
+    
+    // 获取视频URL（处理本地视频路径）
+    const getVideoUrl = (url) => {
+      if (!url) return null
+      
+      // 检查是否是完整的URL
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        return url
+      }
+      
+      // 检查是否是相对路径（以 /media/ 开头）
+      if (url.startsWith('/media/')) {
+        // 构建完整的本地视频URL
+        return `http://localhost:8000${url}`
+      }
+      
+      // 检查是否是缺少协议的路径（以 // 开头）
+      if (url.startsWith('//')) {
+        // 检查是否是 chapter_media 路径
+        if (url.startsWith('//chapter_media/')) {
+          // 构建完整的本地视频URL
+          return `http://localhost:8000/media${url.substring(1)}`
+        }
+        return `http:${url}`
+      }
+      
+      // 其他情况，直接返回
+      return url
+    }
+    
+    // 视频控制方法
+    const rewindVideo = () => {
+      const video = videoPlayer.value
+      if (video) {
+        video.currentTime = Math.max(0, video.currentTime - 10)
+      }
+    }
+    
+    const forwardVideo = () => {
+      const video = videoPlayer.value
+      if (video) {
+        video.currentTime = Math.min(video.duration, video.currentTime + 10)
+      }
+    }
+    
+    const togglePlay = () => {
+      const video = videoPlayer.value
+      if (video) {
+        if (video.paused) {
+          video.play()
+        } else {
+          video.pause()
+        }
+      }
+    }
+    
+    const changeVideoSpeed = () => {
+      const video = videoPlayer.value
+      if (video) {
+        video.playbackRate = parseFloat(videoSpeed.value)
+      }
     }
     
     // 计算调试数据的JSON字符串
@@ -2058,7 +2194,16 @@ export default {
       startSidebarResize,
       // Bilibili URL处理
       isBilibiliUrl,
-      getBilibiliEmbedUrl
+      getBilibiliEmbedUrl,
+      // 视频相关变量和函数
+      videos,
+      playVideo,
+      openChapterVideo,
+      getVideoUrl,  // 添加新方法
+      rewindVideo,  // 添加新方法
+      forwardVideo,  // 添加新方法
+      togglePlay,  // 添加新方法
+      changeVideoSpeed  // 添加新方法
       // AI助手相关变量已移至App.vue中
     }
   }

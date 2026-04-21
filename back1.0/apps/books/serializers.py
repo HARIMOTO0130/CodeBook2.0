@@ -13,6 +13,9 @@ from .models import (
     ChapterVersion,
     ChapterMedia,
     BookReview,
+    BookPermission,
+    PermissionRequest,
+    BookLockLog,
 )
 
 
@@ -325,8 +328,12 @@ class ChapterMediaSerializer(serializers.ModelSerializer):
             'description',
             'order',
             'created_at',
+            'updated_at',
+            'duration',
+            'video_format',
+            'file_size',
         )
-        read_only_fields = ('created_at',)
+        read_only_fields = ('created_at', 'updated_at',)
 
 
 class BookReviewSerializer(serializers.ModelSerializer):
@@ -346,3 +353,134 @@ class BookReviewSerializer(serializers.ModelSerializer):
             'created_at',
         )
         read_only_fields = ('created_at',)
+
+
+class BookPermissionSerializer(serializers.ModelSerializer):
+    """书籍权限序列化器"""
+    book_title = serializers.ReadOnlyField(source='book.title')
+    locked_by_username = serializers.SerializerMethodField()
+    is_expired = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BookPermission
+        fields = (
+            'id',
+            'book',
+            'book_title',
+            'user',
+            'status',
+            'lock_reason',
+            'lock_expires_at',
+            'locked_by',
+            'locked_by_username',
+            'is_expired',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('created_at', 'updated_at')
+
+    def get_locked_by_username(self, obj):
+        if obj.locked_by:
+            return obj.locked_by.username if hasattr(obj.locked_by, 'username') else str(obj.locked_by)
+        return None
+
+    def get_is_expired(self, obj):
+        return obj.is_expired
+
+
+class PermissionRequestSerializer(serializers.ModelSerializer):
+    """权限申请序列化器"""
+    book_title = serializers.ReadOnlyField(source='book.title')
+    username = serializers.SerializerMethodField()
+    reviewer_username = serializers.SerializerMethodField()
+    reviewed_by_username = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PermissionRequest
+        fields = (
+            'id',
+            'book',
+            'book_title',
+            'user',
+            'username',
+            'status',
+            'reason',
+            'expected_duration',
+            'reviewer',
+            'reviewer_username',
+            'reviewed_by',
+            'reviewed_by_username',
+            'review_comment',
+            'created_at',
+            'reviewed_at',
+        )
+        read_only_fields = ('created_at',)
+
+    def get_username(self, obj):
+        if obj.user:
+            return obj.user.username if hasattr(obj.user, 'username') else str(obj.user)
+        return None
+
+    def get_reviewer_username(self, obj):
+        if obj.reviewer:
+            return obj.reviewer.username if hasattr(obj.reviewer, 'username') else str(obj.reviewer)
+        return None
+
+    def get_reviewed_by_username(self, obj):
+        if obj.reviewed_by:
+            return obj.reviewed_by.username if hasattr(obj.reviewed_by, 'username') else str(obj.reviewed_by)
+        return None
+
+
+class PermissionRequestCreateSerializer(serializers.ModelSerializer):
+    """权限申请创建序列化器"""
+
+    class Meta:
+        model = PermissionRequest
+        fields = (
+            'reason',
+            'expected_duration',
+        )
+
+
+class BookLockLogSerializer(serializers.ModelSerializer):
+    """书籍加锁日志序列化器"""
+    book_title = serializers.ReadOnlyField(source='book.title')
+    operator_username = serializers.SerializerMethodField()
+    target_user_username = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BookLockLog
+        fields = (
+            'id',
+            'book',
+            'book_title',
+            'operator',
+            'operator_username',
+            'target_user',
+            'target_user_username',
+            'action',
+            'reason',
+            'duration',
+            'ip_address',
+            'user_agent',
+            'created_at',
+        )
+        read_only_fields = ('created_at',)
+
+    def get_operator_username(self, obj):
+        if obj.operator:
+            return obj.operator.username if hasattr(obj.operator, 'username') else str(obj.operator)
+        return None
+
+    def get_target_user_username(self, obj):
+        if obj.target_user:
+            return obj.target_user.username if hasattr(obj.target_user, 'username') else str(obj.target_user)
+        return None
+
+
+class BookLockSerializer(serializers.Serializer):
+    """书籍加锁/解锁请求序列化器"""
+    reason = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=1000)
+    duration = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=50)
+    unlock_reason = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=1000)

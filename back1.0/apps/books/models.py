@@ -507,6 +507,11 @@ class ChapterMedia(models.Model):
     description = models.TextField(blank=True, verbose_name='描述')
     order = models.IntegerField(default=0, verbose_name='排序')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+    # 视频相关字段
+    duration = models.CharField(max_length=50, blank=True, null=True, verbose_name='视频时长')
+    video_format = models.CharField(max_length=20, blank=True, null=True, verbose_name='视频格式')
+    file_size = models.CharField(max_length=20, blank=True, null=True, verbose_name='视频大小')
 
     class Meta:
         verbose_name = '章节多媒体资源'
@@ -672,7 +677,7 @@ class BookPermission(models.Model):
         related_name='book_permissions',
         verbose_name='用户'
     )
-    
+
     # 权限状态
     STATUS_CHOICES = [
         ('open', '已开放'),
@@ -685,21 +690,46 @@ class BookPermission(models.Model):
         default='open',
         verbose_name='权限状态'
     )
-    
+
+    # 锁定信息
+    lock_reason = models.TextField(blank=True, null=True, verbose_name='锁定原因')
+    lock_expires_at = models.DateTimeField(blank=True, null=True, verbose_name='锁定期限')
+    locked_by = models.ForeignKey(
+        getattr(settings, 'AUTH_USER_MODEL', 'auth.User'),
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='locked_books',
+        verbose_name='锁定人'
+    )
+
     # 时间戳
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
-    
+
     class Meta:
         verbose_name = '书籍权限'
         verbose_name_plural = '书籍权限'
         unique_together = ('book', 'user')  # 确保每本书对每个用户只有一条权限记录
-    
+
     def __str__(self):
         if self.user:
             return f"{self.book.title} - {self.user.username} - {self.get_status_display()}"
         else:
             return f"{self.book.title} - 全局 - {self.get_status_display()}"
+
+    @property
+    def is_locked(self):
+        """检查书籍是否被锁定"""
+        return self.status == 'locked'
+
+    @property
+    def is_expired(self):
+        """检查锁定是否已过期"""
+        if self.status == 'locked' and self.lock_expires_at:
+            from django.utils import timezone
+            return timezone.now() > self.lock_expires_at
+        return False
 
 
 class PermissionRequest(models.Model):
@@ -711,7 +741,7 @@ class PermissionRequest(models.Model):
         related_name='permission_requests',
         verbose_name='申请人'
     )
-    
+
     # 申请状态
     STATUS_CHOICES = [
         ('pending', '待审核'),
@@ -724,10 +754,17 @@ class PermissionRequest(models.Model):
         default='pending',
         verbose_name='申请状态'
     )
-    
+
     # 申请信息
     reason = models.TextField(blank=True, null=True, verbose_name='申请原因')
-    
+    expected_duration = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text='预计使用时长，如"2小时"、"1天"',
+        verbose_name='预计使用时长'
+    )
+
     # 审核信息
     reviewer = models.ForeignKey(
         getattr(settings, 'AUTH_USER_MODEL', 'auth.User'),
@@ -737,16 +774,82 @@ class PermissionRequest(models.Model):
         related_name='reviewed_permission_requests',
         verbose_name='审核人'
     )
+    reviewed_by = models.ForeignKey(
+        getattr(settings, 'AUTH_USER_MODEL', 'auth.User'),
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='unlock_requests_processed',
+        verbose_name='处理人'
+    )
     review_comment = models.TextField(blank=True, null=True, verbose_name='审核意见')
-    
+
     # 时间戳
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='申请时间')
     reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='审核时间')
-    
+
     class Meta:
         verbose_name = '权限申请'
         verbose_name_plural = '权限申请'
         ordering = ['-created_at']
-    
+
     def __str__(self):
         return f"{self.user.username} - {self.book.title} - {self.get_status_display()}"
+
+
+class BookLockLog(models.Model):
+    """书籍加锁日志模型"""
+    ACTION_CHOICES = [
+        ('lock', '加锁'),
+        ('unlock', '解锁'),
+        ('request_unlock', '申请解锁'),
+        ('approve_unlock', '批准解锁'),
+        ('reject_unlock', '拒绝解锁'),
+    ]
+
+    book = models.ForeignKey(
+        Book,
+        on_delete=models.CASCADE,
+        related_name='lock_logs',
+        verbose_name='书籍'
+    )
+    operator = models.ForeignKey(
+        getattr(settings, 'AUTH_USER_MODEL', 'auth.User'),
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='lock_operations',
+        verbose_name='操作人'
+    )
+    target_user = models.ForeignKey(
+        getattr(settings, 'AUTH_USER_MODEL', 'auth.User'),
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='lock_requests_received',
+        verbose_name='目标用户'
+    )
+    action = models.CharField(
+        max_length=20,
+        choices=ACTION_CHOICES,
+        verbose_name='操作类型'
+    )
+    reason = models.TextField(blank=True, null=True, verbose_name='操作原因')
+    duration = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text='锁定时长，如"2小时"、"1天"',
+        verbose_name='锁定时长'
+    )
+    ip_address = models.GenericIPAddressField(blank=True, null=True, verbose_name='IP地址')
+    user_agent = models.TextField(blank=True, null=True, verbose_name='用户代理')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='操作时间')
+
+    class Meta:
+        verbose_name = '书籍加锁日志'
+        verbose_name_plural = '书籍加锁日志'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.book.title} - {self.get_action_display()} - {self.created_at}"

@@ -156,19 +156,32 @@
               </div>
             </div>
             <div class="book-actions">
+              <template v-if="book.permission_status === 'locked'">
+                <button 
+                  class="btn btn-primary"
+                  @click="showPermissionRequiredMessage(book)"
+                >
+                  需要权限
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  @click="openPermissionRequest(book)"
+                >
+                  申请解锁
+                </button>
+              </template>
               <router-link 
+                v-else
                 :to="`/student/books/${book.id}`" 
                 class="btn btn-primary"
-                :disabled="book.permission_status === 'locked'"
               >
-                {{ book.permission_status === 'locked' ? '需要权限' : '继续学习' }}
+                继续学习
               </router-link>
-              <button 
-                v-if="book.permission_status === 'locked'"
-                class="btn btn-secondary"
-                @click="openPermissionRequest(book)"
+              <button
+                class="btn btn-info"
+                @click="openMyRequests(book)"
               >
-                申请权限
+                我的申请
               </button>
               <button 
                 class="btn btn-danger delete-btn"
@@ -243,7 +256,7 @@
     <div v-if="showPermissionRequest" class="modal-overlay" @click.self="showPermissionRequest = false">
       <div class="modal">
         <div class="modal-header">
-          <h3>申请阅读权限</h3>
+          <h3>申请解锁教材</h3>
           <button class="close-btn" @click="showPermissionRequest = false">×</button>
         </div>
         <div class="modal-body">
@@ -253,7 +266,23 @@
           </div>
           <div class="form-group">
             <label class="form-label">申请原因</label>
-            <textarea v-model="permissionRequestReason" class="input" rows="4" placeholder="请说明您需要阅读此书的原因"></textarea>
+            <textarea v-model="permissionRequestReason" class="input" rows="3" placeholder="请说明您需要阅读此书的原因"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">预计使用时长</label>
+            <select v-model="permissionRequestDuration" class="input">
+              <option value="1小时">1小时</option>
+              <option value="2小时">2小时</option>
+              <option value="半天">半天</option>
+              <option value="1天">1天</option>
+              <option value="3天">3天</option>
+              <option value="1周" selected>1周</option>
+              <option value="2周">2周</option>
+              <option value="1个月">1个月</option>
+            </select>
+          </div>
+          <div class="unlock-request-tips">
+            <p class="tip-text">💡 提示：您的申请将发送给教材提供者审核，请耐心等待</p>
           </div>
         </div>
         <div class="modal-footer">
@@ -261,6 +290,42 @@
           <button class="btn btn-primary" @click="submitPermissionRequest" :disabled="submittingPermission">
             {{ submittingPermission ? '提交中...' : '提交申请' }}
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 我的申请记录弹窗 -->
+    <div v-if="showMyRequests" class="modal-overlay" @click.self="showMyRequests = false">
+      <div class="modal" style="width: 550px;">
+        <div class="modal-header">
+          <h3>我的解锁申请记录</h3>
+          <button class="close-btn" @click="showMyRequests = false">×</button>
+        </div>
+        <div class="modal-body" style="max-height: 400px; overflow-y: auto;">
+          <div v-if="myRequestsLoading" class="empty-tip">正在加载...</div>
+          <div v-else-if="myRequests.length === 0" class="empty-tip">暂无申请记录</div>
+          <div v-else class="my-requests-list">
+            <div
+              v-for="req in myRequests"
+              :key="req.id"
+              class="request-item"
+            >
+              <div class="request-header">
+                <span class="request-book">{{ req.book_title }}</span>
+                <span class="request-status" :class="req.status">{{ getStatusText(req.status) }}</span>
+              </div>
+              <div class="request-content">
+                <p><strong>申请原因：</strong>{{ req.reason || '无' }}</p>
+                <p><strong>预计时长：</strong>{{ req.expected_duration || '未指定' }}</p>
+                <p><strong>申请时间：</strong>{{ formatTime(req.created_at) }}</p>
+                <p v-if="req.reviewed_at"><strong>处理时间：</strong>{{ formatTime(req.reviewed_at) }}</p>
+                <p v-if="req.review_comment"><strong>处理意见：</strong>{{ req.review_comment }}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="showMyRequests = false">关闭</button>
         </div>
       </div>
     </div>
@@ -472,7 +537,13 @@ export default {
     const showPermissionRequest = ref(false)
     const selectedBook = ref(null)
     const permissionRequestReason = ref('')
+    const permissionRequestDuration = ref('1周')
     const submittingPermission = ref(false)
+
+    // 我的申请相关状态
+    const showMyRequests = ref(false)
+    const myRequests = ref([])
+    const myRequestsLoading = ref(false)
 
     const onPickPdf = (e) => {
       const f = e.target.files && e.target.files[0]
@@ -629,21 +700,11 @@ export default {
 
     // 格式化时间
     const formatTime = (timeStr) => {
-      const date = new Date(timeStr)
-      const now = new Date()
-      const diff = now - date
-      const days = Math.floor(diff / (1000 * 60 * 60 * 24))
-      if (days === 0) {
-        return '今天'
-      } else if (days === 1) {
-        return '昨天'
-      } else if (days < 7) {
-        return `${days}天前`
-      } else {
-        return date.toLocaleDateString()
-      }
+      if (!timeStr) return ''
+      const d = new Date(timeStr)
+      return d.toLocaleString()
     }
-    
+
     // 权限状态相关方法
     const getPermissionStatusText = (status) => {
       const statusMap = {
@@ -653,32 +714,64 @@ export default {
       }
       return statusMap[status] || status
     }
-    
+
     // 打开权限申请弹窗
     const openPermissionRequest = (book) => {
       selectedBook.value = book
       permissionRequestReason.value = ''
+      permissionRequestDuration.value = '1周'
       showPermissionRequest.value = true
     }
-    
+
     // 提交权限申请
     const submitPermissionRequest = async () => {
       if (!selectedBook.value || !permissionRequestReason.value) return
       submittingPermission.value = true
       try {
         await api.requestBookPermission(selectedBook.value.id, {
-          reason: permissionRequestReason.value
+          reason: permissionRequestReason.value,
+          expected_duration: permissionRequestDuration.value
         })
-        alert('权限申请已提交，等待审核')
+        alert('解锁申请已提交，等待审核')
         showPermissionRequest.value = false
         // 重新加载书籍列表
         await loadBooks()
       } catch (e) {
-        console.error('提交权限申请失败', e)
+        console.error('提交解锁申请失败', e)
         alert('提交失败: ' + (e.message || '未知错误'))
       } finally {
         submittingPermission.value = false
       }
+    }
+
+    // 打开我的申请记录弹窗
+    const openMyRequests = async (book) => {
+      selectedBook.value = book
+      myRequestsLoading.value = true
+      showMyRequests.value = true
+      try {
+        myRequests.value = await api.getMyUnlockRequests(book.id)
+      } catch (e) {
+        console.error('获取申请记录失败', e)
+        myRequests.value = []
+      } finally {
+        myRequestsLoading.value = false
+      }
+    }
+
+    // 显示需要权限的提示信息
+    const showPermissionRequiredMessage = (book) => {
+      alert(`《${book.title}》已被锁定，需要申请权限才能访问\n\n请点击"申请解锁"按钮提交解锁申请`)
+    }
+
+    // 获取状态文本
+    const getStatusText = (status) => {
+      const statusMap = {
+        pending: '待审核',
+        approved: '已批准',
+        rejected: '已拒绝'
+      }
+      return statusMap[status] || status
     }
 
     // 跳转到轻量化工具包中的对应工具
@@ -728,10 +821,19 @@ export default {
       showPermissionRequest,
       selectedBook,
       permissionRequestReason,
+      permissionRequestDuration,
       submittingPermission,
       getPermissionStatusText,
       openPermissionRequest,
-      submitPermissionRequest
+      submitPermissionRequest,
+      // 我的申请相关
+      showMyRequests,
+      myRequests,
+      myRequestsLoading,
+      openMyRequests,
+      getStatusText,
+      formatTime,
+      showPermissionRequiredMessage
     }
   }
 }
@@ -1523,6 +1625,87 @@ textarea.input {
   border: 1px solid #ddd;
   border-radius: 4px;
   font-size: 14px;
+}
+
+/* 解锁申请相关样式 */
+.unlock-request-tips {
+  margin-top: 12px;
+  padding: 10px;
+  background: #f0f9eb;
+  border-radius: 4px;
+}
+
+.unlock-request-tips .tip-text {
+  margin: 0;
+  font-size: 13px;
+  color: #67c23a;
+}
+
+.my-requests-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.request-item {
+  padding: 12px;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  background: #f9fafc;
+}
+
+.request-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.request-book {
+  font-weight: 500;
+  color: #333;
+}
+
+.request-status {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.request-status.pending {
+  background: #ecf5ff;
+  color: #409eff;
+}
+
+.request-status.approved {
+  background: #f0f9eb;
+  color: #67c23a;
+}
+
+.request-status.rejected {
+  background: #fef0f0;
+  color: #f56c6c;
+}
+
+.request-content {
+  font-size: 13px;
+  color: #666;
+}
+
+.request-content p {
+  margin: 4px 0;
+}
+
+.btn-info {
+  background: #909399;
+  border-color: #909399;
+  color: #fff;
+}
+
+.btn-info:hover {
+  background: #a6a9ad;
+  border-color: #a6a9ad;
 }
 
 /* 响应式 */

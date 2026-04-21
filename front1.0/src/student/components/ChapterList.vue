@@ -14,9 +14,15 @@
       >
         <div class="chapter-info">
           <div class="chapter-title">{{ chapter.title }}</div>
-          <div v-if="chapter.has_practice" class="practice-badge">
-            <span class="practice-icon">💡</span>
-            <span class="practice-text">有练习</span>
+          <div class="chapter-badges">
+            <div v-if="chapter.has_practice" class="practice-badge">
+              <span class="practice-icon">💡</span>
+              <span class="practice-text">有练习</span>
+            </div>
+            <div v-if="chapter.hasVideo || chapter.video_url || chapter.media_count > 0" class="video-badge">
+              <span class="video-icon">🎥</span>
+              <span class="video-text">有视频</span>
+            </div>
           </div>
         </div>
         <div class="chapter-actions">
@@ -194,6 +200,12 @@ export default {
   font-weight: 500;
 }
 
+.chapter-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .practice-badge {
   display: inline-flex;
   align-items: center;
@@ -204,6 +216,26 @@ export default {
   color: white;
   border-radius: 10px;
   align-self: flex-start;
+}
+
+.video-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  color: white;
+  border-radius: 10px;
+  align-self: flex-start;
+}
+
+.video-icon {
+  font-size: 10px;
+}
+
+.video-text {
+  font-weight: 500;
 }
 
 .practice-icon {
