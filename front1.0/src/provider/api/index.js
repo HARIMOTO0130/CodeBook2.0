@@ -219,13 +219,39 @@ export const providerApi = {
   async updateBookPermission(bookId, payload) {
     return request(`/${bookId}/permission/`, { method: 'PATCH', body: payload, auth: true })
   },
-  
+
   async listPermissionRequests(bookId) {
     return request(`/${bookId}/permission-requests/`, { auth: true })
   },
-  
+
   async reviewPermissionRequest(requestId, payload) {
     return request(`/permission-requests/${requestId}/review/`, { method: 'PATCH', body: payload, auth: true })
+  },
+
+  // 加锁/解锁相关API
+  async lockBook(bookId, payload) {
+    return request(`/${bookId}/lock/`, { method: 'PATCH', body: payload, auth: true })
+  },
+
+  async unlockBook(bookId, payload) {
+    return request(`/${bookId}/unlock/`, { method: 'PATCH', body: payload, auth: true })
+  },
+
+  async getBookLockInfo(bookId) {
+    return request(`/${bookId}/lock-info/`, { auth: true })
+  },
+
+  async getBookLockLogs(bookId) {
+    return request(`/${bookId}/lock-logs/`, { auth: true })
+  },
+
+  // 用户权限管理API
+  async listUserPermissions(bookId) {
+    return request(`/${bookId}/user-permissions/`, { auth: true })
+  },
+
+  async updateUserPermission(permissionId, payload) {
+    return request(`/user-permissions/${permissionId}/`, { method: 'PATCH', body: payload, auth: true })
   },
 }
 

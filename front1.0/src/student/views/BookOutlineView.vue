@@ -458,15 +458,28 @@ export default {
         findLastLearnedSection()
       } catch (error) {
         console.error('加载书籍详情失败:', error)
-        // 使用模拟数据
-        book.value = getMockBookData()
-        console.log('使用模拟数据显示书籍信息')
-        // 默认展开第一个章节
-        if (book.value && book.value.chapters.length > 0) {
-          expandedChapters.value.add(book.value.chapters[0].id)
+        // 如果是权限错误（403），不使用模拟数据，而是显示权限错误信息
+        if (error.message && error.message.includes('403')) {
+          book.value = {
+            id: bookId.value,
+            title: '权限受限',
+            author: '系统',
+            description: '此教材已被锁定，需要申请权限才能访问',
+            permission_status: 'locked',
+            chapters: []
+          }
+          console.log('书籍被锁定，显示权限错误信息')
+        } else {
+          // 其他错误使用模拟数据
+          book.value = getMockBookData()
+          console.log('使用模拟数据显示书籍信息')
+          // 默认展开第一个章节
+          if (book.value && book.value.chapters.length > 0) {
+            expandedChapters.value.add(book.value.chapters[0].id)
+          }
+          // 查找最后学习的章节
+          findLastLearnedSection()
         }
-        // 查找最后学习的章节
-        findLastLearnedSection()
       }
     }
 

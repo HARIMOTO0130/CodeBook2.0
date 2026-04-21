@@ -1107,7 +1107,7 @@ export default {
   background-color: #fff;
   border: 1px solid #e0e0e0;
   border-radius: 12px;
-  padding: 20px;
+  padding: 15px; /* 减少内边距 */
   cursor: pointer;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
@@ -1115,6 +1115,10 @@ export default {
   flex-direction: column;
   opacity: 1;
   transform: translateY(0);
+  width: 100%; /* 确保占满宽度 */
+  height: 100%; /* 确保占满高度 */
+  margin: 0;
+  box-sizing: border-box;
 }
 
 .practice-card:hover {
@@ -1266,7 +1270,7 @@ export default {
 .chapters-container {
   display: flex;
   flex-direction: column;
-  gap: 30px;
+  gap: 20px; /* 减少章节之间的间距 */
 }
 
 /* 章节部分 */
@@ -1274,8 +1278,9 @@ export default {
   background-color: #fff;
   border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  padding: 25px;
+  padding: 15px; /* 进一步减少内边距 */
   transition: box-shadow 0.3s ease;
+  width: 100%; /* 确保占满宽度 */
 }
 
 .chapter-section:hover {
@@ -1286,30 +1291,30 @@ export default {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
-  padding-bottom: 15px;
+  margin-bottom: 12px; /* 进一步减少间距 */
+  padding-bottom: 8px; /* 进一步减少底部边框的间距 */
   border-bottom: 2px solid #f0f0f0;
 }
 
 .chapter-section-title {
-  font-size: 20px;
+  font-size: 18px; /* 稍微减小标题字体 */
   color: #333;
   margin: 0;
   font-weight: 600;
 }
 
 .chapter-section-count {
-  font-size: 14px;
+  font-size: 13px; /* 稍微减小字体 */
   color: #999;
   background-color: #f5f5f5;
-  padding: 5px 15px;
+  padding: 4px 12px; /* 减少内边距 */
   border-radius: 15px;
   font-weight: 500;
 }
 
 .chapter-empty {
   text-align: center;
-  padding: 40px 20px;
+  padding: 25px 20px; /* 进一步减少内边距 */
   color: #999;
   font-size: 14px;
 }
@@ -1317,9 +1322,13 @@ export default {
 /* 练习网格 */
 .practice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(3, 1fr); /* 固定3列，占满整行 */
+  gap: 0; /* 移除间距 */
+  width: 100%; /* 确保占满父容器宽度 */
+  margin: 0;
+  padding: 0;
 }
+
 
 
 
@@ -1327,12 +1336,12 @@ export default {
 .practice-header {
   display: flex;
   align-items: flex-start;
-  margin-bottom: 15px;
+  margin-bottom: 12px; /* 减少间距 */
 }
 
 .practice-icon {
   font-size: 24px;
-  margin-right: 15px;
+  margin-right: 12px; /* 减少间距 */
   width: 48px;
   height: 48px;
   display: flex;
@@ -1356,7 +1365,7 @@ export default {
   font-size: 16px;
   font-weight: 600;
   color: #333;
-  margin: 0 0 8px 0;
+  margin: 0 0 6px 0; /* 减少间距 */
   line-height: 1.4;
   transition: color 0.3s ease;
 }
@@ -1367,7 +1376,7 @@ export default {
 
 .practice-meta {
   display: flex;
-  gap: 10px;
+  gap: 8px; /* 减少间距 */
   align-items: center;
   margin: 0;
 }
@@ -1392,7 +1401,7 @@ export default {
 
 /* 练习内容 */
 .practice-content {
-  margin-bottom: 20px;
+  margin-bottom: 15px; /* 减少间距 */
   flex: 1;
 }
 
@@ -1412,13 +1421,13 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 15px;
+  padding-top: 12px; /* 减少间距 */
   border-top: 1px solid #f8f9fa;
 }
 
 .practice-stats {
   display: flex;
-  gap: 10px;
+  gap: 8px; /* 减少间距 */
   align-items: center;
 }
 
@@ -1538,21 +1547,21 @@ export default {
 /* 大屏幕桌面 (1200px+) */
 @media (min-width: 1200px) {
   .practice-grid {
-    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    grid-template-columns: repeat(3, 1fr); /* 固定3列，占满整行 */
   }
 }
 
 /* 中等屏幕桌面 (992px-1199px) */
 @media (max-width: 1199px) {
   .practice-grid {
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    grid-template-columns: repeat(2, 1fr); /* 中等屏幕2列 */
   }
 }
 
 /* 平板设备 (768px-991px) */
 @media (max-width: 991px) {
   .practice-grid {
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(2, 1fr); /* 平板2列 */
   }
   
   .stats-cards {
@@ -1575,28 +1584,28 @@ export default {
   }
   
   .chapter-section {
-    padding: 20px;
+    padding: 12px; /* 进一步减少内边距 */
   }
   
   .chapter-section-header {
     flex-direction: column;
     align-items: flex-start;
-    gap: 10px;
+    gap: 8px; /* 减少间距 */
   }
   
   .practice-grid {
-    grid-template-columns: 1fr;
-    gap: 15px;
+    grid-template-columns: 1fr; /* 小屏幕1列 */
+    gap: 12px; /* 减少间距 */
   }
   
   .practice-card {
-    padding: 18px;
+    padding: 15px; /* 减少内边距 */
   }
   
   .practice-footer {
     flex-direction: column;
     align-items: stretch;
-    gap: 10px;
+    gap: 8px; /* 减少间距 */
   }
   
   .practice-stats {
