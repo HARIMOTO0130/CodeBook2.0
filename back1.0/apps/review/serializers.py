@@ -10,7 +10,6 @@ class ReviewTaskListSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     task_type_display = serializers.CharField(source='get_task_type_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
-    assigned_reviewer_name = serializers.CharField(source='assigned_reviewer.username', read_only=True)
     
     # 提交人信息
     submitted_by_info = serializers.SerializerMethodField()
@@ -18,10 +17,9 @@ class ReviewTaskListSerializer(serializers.ModelSerializer):
     class Meta:
         model = ReviewTask
         fields = ['id', 'book_id', 'book_title', 'book_author', 'task_type', 'task_type_display',
-                  'priority', 'priority_display', 'status', 'status_display', 'assigned_reviewer',
-                  'assigned_reviewer_name', 'submitted_by_name', 'submitted_at', 'deadline',
-                  'version_number', 'chapter_count', 'created_at', 'submitted_by_info',
-                  'book_isbn', 'book_language', 'book_word_count', 'category_name']
+                  'priority', 'priority_display', 'status', 'status_display', 'submitted_by_name',
+                  'submitted_at', 'deadline', 'version_number', 'chapter_count', 'created_at',
+                  'submitted_by_info', 'book_isbn', 'book_language', 'book_word_count', 'category_name']
     
     def get_submitted_by_info(self, obj):
         """获取提交人详细信息"""
@@ -41,7 +39,6 @@ class ReviewTaskDetailSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     task_type_display = serializers.CharField(source='get_task_type_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
-    assigned_reviewer_name = serializers.CharField(source='assigned_reviewer.username', read_only=True)
     ai_record = serializers.SerializerMethodField()
     manual_records = serializers.SerializerMethodField()
     edit_history = serializers.SerializerMethodField()
@@ -55,11 +52,10 @@ class ReviewTaskDetailSerializer(serializers.ModelSerializer):
         model = ReviewTask
         fields = ['id', 'book_id', 'book_title', 'book_subtitle', 'book_author', 'book_isbn',
                   'book_language', 'book_word_count', 'task_type', 'task_type_display',
-                  'priority', 'priority_display', 'status', 'status_display', 'assigned_reviewer',
-                  'assigned_reviewer_name', 'submitted_by_id', 'submitted_by_name', 'submitted_at',
-                  'deadline', 'version_number', 'previous_version', 'chapter_count', 'description',
-                  'change_summary', 'category_name', 'tags', 'created_at', 'updated_at',
-                  'original_uploaded_at', 'last_modified_at', 'ai_record', 'manual_records',
+                  'priority', 'priority_display', 'status', 'status_display', 'submitted_by_id',
+                  'submitted_by_name', 'submitted_at', 'deadline', 'version_number', 'previous_version',
+                  'chapter_count', 'description', 'change_summary', 'category_name', 'tags', 'created_at',
+                  'updated_at', 'original_uploaded_at', 'last_modified_at', 'ai_record', 'manual_records',
                   'edit_history', 'submitted_by_info', 'modified_by_info', 'original_uploader_info']
     
     def get_ai_record(self, obj):

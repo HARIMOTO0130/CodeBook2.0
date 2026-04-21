@@ -40,15 +40,15 @@ class ReviewTask(models.Model):
     priority = models.IntegerField(default=0, choices=PRIORITY_CHOICES, verbose_name='优先级')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name='状态')
     
-    # 审核员信息
-    assigned_reviewer = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='assigned_tasks',
-        verbose_name='指派审核员'
-    )
+    # 审核员信息（暂时注释掉，因为数据库表中没有这个字段）
+    # assigned_reviewer = models.ForeignKey(
+    #     settings.AUTH_USER_MODEL,
+    #     on_delete=models.SET_NULL,
+    #     null=True,
+    #     blank=True,
+    #     related_name='assigned_tasks',
+    #     verbose_name='指派审核员'
+    # )
     
     # 提交人信息（教师/上传者）
     submitted_by_id = models.IntegerField(null=True, blank=True, verbose_name='提交人ID')

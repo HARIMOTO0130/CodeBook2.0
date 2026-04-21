@@ -77,6 +77,34 @@
             <span class="title-icon">🚪</span> 退出
           </button>
         </template>
+        
+        <!-- 审核端导航 - 只在审核端路由显示 -->
+        <template v-else-if="navType === 'review'">
+          <router-link to="/review/dashboard" class="nav-item">
+            <span class="title-icon">📊</span> 工作台
+          </router-link>
+          <router-link to="/review/books" class="nav-item">
+            <span class="title-icon">📚</span> 教材列表
+          </router-link>
+          <router-link to="/review/pending" class="nav-item">
+            <span class="title-icon">📋</span> 待审核
+          </router-link>
+          <router-link to="/review/approved" class="nav-item">
+            <span class="title-icon">✅</span> 已通过
+          </router-link>
+          <router-link to="/review/rejected" class="nav-item">
+            <span class="title-icon">❌</span> 已驳回
+          </router-link>
+          <router-link to="/review/history" class="nav-item">
+            <span class="title-icon">📜</span> 审核历史
+          </router-link>
+          <router-link to="/review/settings" class="nav-item">
+            <span class="title-icon">⚙️</span> 设置
+          </router-link>
+          <button class="nav-item" @click="onLogout">
+            <span class="title-icon">🚪</span> 退出
+          </button>
+        </template>
         </div>
     </nav>
 
@@ -252,6 +280,11 @@ export default {
       return route.path.startsWith('/teacher/')
     })
     
+    // 判断当前是否在审核端路由
+    const isReviewRoute = computed(() => {
+      return route.path.startsWith('/review/')
+    })
+    
     // 根据路由路径决定显示的导航类型
     const navType = computed(() => {
       if (isProviderRoute.value) {
@@ -260,6 +293,8 @@ export default {
         return 'student'
       } else if (isTeacherRoute.value) {
         return 'teacher'
+      } else if (isReviewRoute.value) {
+        return 'review'
       }
       return 'none' // 登录页面等不显示导航
     })
@@ -845,6 +880,7 @@ export default {
       isProviderRoute,
       isStudentRoute,
       isTeacherRoute,
+      isReviewRoute,
       // AI助手相关变量和函数
       showAssistant,
       isDragging,
